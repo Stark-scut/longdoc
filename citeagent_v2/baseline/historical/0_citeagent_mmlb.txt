@@ -1,0 +1,20 @@
+Overall Acc: 0.619998738756297 | Question Number: 1082
+Overall F1-score: 0.6060485429691529 | Question Number: 1082
+-----------------------
+Single-page | Accuracy: 0.6566022830634661 | Question Number: 494
+Cross-page | Accuracy: 0.4744008266154864 | Question Number: 372
+Unanswerable | Accuracy: 0.7892376681614349 | Question Number: 223
+-----------------------
+Evidence Sources: Chart | Accuracy: 0.5725799481417458 | Question Number: 178
+Evidence Sources: Table | Accuracy: 0.6619343309595603 | Question Number: 218
+Evidence Sources: Pure-text (Plain-text) | Accuracy: 0.5593336814539943 | Question Number: 305
+Evidence Sources: Generalized-text (Layout) | Accuracy: 0.593532883132549 | Question Number: 119
+Evidence Sources: Figure | Accuracy: 0.48509398891495326 | Question Number: 304
+-----------------------
+Document Type: Research report / Introduction | Accuracy: 0.6211131870112584 | Question Number: 292
+Document Type: Tutorial/Workshop | Accuracy: 0.6197377364385037 | Question Number: 138
+Document Type: Academic paper | Accuracy: 0.6678852656695529 | Question Number: 199
+Document Type: Guidebook | Accuracy: 0.5878351193438512 | Question Number: 155
+Document Type: Brochure | Accuracy: 0.537267441860465 | Question Number: 100
+Document Type: Administration/Industry file | Accuracy: 0.6317090622257133 | Question Number: 81
+Document Type: Financial report | Accuracy: 0.6412904915012397 | Question Number: 117

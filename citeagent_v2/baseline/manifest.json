@@ -1,0 +1,79 @@
+{
+  "created_at": "2026-10-23T14:50:34.442148+08:00",
+  "sample_indices": [
+    281,
+    283,
+    289,
+    291
+  ],
+  "document_pages": {
+    "2303.05039v2": 9,
+    "2310.07609v1": 10
+  },
+  "source_samples": {
+    "path": "/media/data1/leizh/longdoc/aaai_commit_20260803/aaai_commit/data/mmlongbench/samples.json",
+    "sha256": "4ffadad60b18cd7ede864155f3e8a366fe4deec2189b3d0a25691b7df4b839e8"
+  },
+  "source_blocks": {
+    "path": "/media/data1/leizh/longdoc/aaai_commit_20260803/aaai_commit/data/mmlongbench/stage2_blocks_cache.jsonl",
+    "sha256": "98b80368b75e1c9fead35c01d8ceb25764d784c4b285f6dafe3c231a8f0176f3"
+  },
+  "source_captions": {
+    "path": "/media/data1/leizh/longdoc/aaai_commit_20260803/aaai_commit/data/mmlongbench/crop_captions.jsonl",
+    "sha256": "d48430c395c26448454cdc6cc43db7653c47d964f1754077a569e0d443b6d101"
+  },
+  "files": {
+    "cases.json": "8cd3e0c4190eb4c9ffbef142dd834231f1270e311300a9fcc10a7efe81793126",
+    "crops/2303.05039v2/page_3.png_b14.jpg": "40ba05e592ced36b78e8ede7796008385cda2dd20cdc98ce88a1ebdd78a4658b",
+    "crops/2303.05039v2/page_3.png_b3.jpg": "ed7e70ca9794d8a1af2fffba754d723d99b524cb673f9119061d61ed98b5ff14",
+    "crops/2303.05039v2/page_3.png_b8.jpg": "cb810a0d50ea6344421c924be80466fa45fd64d586c376a65d9446536f97be9a",
+    "crops/2303.05039v2/page_4.png_b5.jpg": "f65efef64f6f407a0e00e130e75e98a77070dac3a747c83f15a153d6b519d727",
+    "crops/2303.05039v2/page_5.png_b2.jpg": "4c1152bb54064e0f31b9cf707075a5cb7d18a935cc6c1d16ed43b691abd81b69",
+    "crops/2303.05039v2/page_5.png_b4.jpg": "56a54da03c44d8cc19001169e2d4364ac15cf5187e13737b442d76b9974bf2ae",
+    "crops/2303.05039v2/page_7.png_b2.jpg": "c65933e95c6ff6d1cdd95a2b84a8bbf7f228f2f5ad089d194f96f29d82c42c54",
+    "crops/2303.05039v2/page_7.png_b4.jpg": "564d1d3b1180d16914ea64d9d3bef72384322ced7011be93bfdfa34e1285dd3e",
+    "crops/2310.07609v1/page_0.png_b9.jpg": "b60befd19c01e95eb0b655b9099890995eec9149010f0852c8a8d23cf6e6424f",
+    "crops/2310.07609v1/page_1.png_b5.jpg": "a9e8a99691d1e6ab1235372d189c052158181001d7c5cb7a18b48adca9821aea",
+    "crops/2310.07609v1/page_3.png_b0.jpg": "e02f8f3012777e52318474cfd73ccbfc614b1855953b9f014e3c95af96ef2c12",
+    "crops/2310.07609v1/page_4.png_b0.jpg": "a63541b4e190b638d92050e0566a05109feab2983cc46f276729e38722d3e109",
+    "crops/2310.07609v1/page_5.png_b0.jpg": "e9ca28561e00d1ef77f78b684750e1c94cf56679953af54920a123bdff4e7e4a",
+    "data/blocks.jsonl": "e257d3642a7ba65b83da40f27324759922367636e28315b59159e762a696c118",
+    "data/captions.jsonl": "3b54042d74d8f3e8df40a57a568e1df66b9671a39cb9ef9979d5304a3534e462",
+    "environment.json": "9be5c4e7bb380b29ef00fd5cdfc03b1a074a8fc00df6fb0ada52d5604eda050b",
+    "eval_score.py": "cafa268358b08521cfc9a805c67d86732d943677e4408c5751f336123d09631f",
+    "extract_prompt.md": "96a22c3003c22801f1f19717be45070b1d6b9ce76b42e171e044f63b641de659",
+    "historical/0_COMPLETE": "e33d7757379022356128ef86e342bcf06944641d532b4cedff337f885b233dbb",
+    "historical/0_citeagent_mmlb.json": "b9d7c0e8c6984ac0a42cf205135dff5db97a0dc2f4ca2a8053b9add89f60a724",
+    "historical/0_citeagent_mmlb.txt": "0f3b9a9d044e2756138bd8d65fedfb565c286f1bb6bc0f7ad37a67ec1af6dc2c",
+    "historical/0_citeagent_mmlb_traces.jsonl": "6a764fb1760a2962670f78d2cfaf2d3db9d19a95cf9f5fd676fb28571a79261f",
+    "historical/selected_records.json": "0f906d43ae96355a18b90850826d69cb91e8705a10d34f31e0be4b71d3be49e2",
+    "images/2303.05039v2/page_0.png": "c2400f8e44b37c0ad341360cf067ae1310a70a1d530121bf085eeec57457d1cc",
+    "images/2303.05039v2/page_1.png": "89dc225898681bb486decb16d5ac1c965b0c26d9d42caeadd87d1dc0e581fc75",
+    "images/2303.05039v2/page_2.png": "bf45f5ca45c9b3a5e0429169d59ed838803ee18ee3ac364bf24716c1f5cd4732",
+    "images/2303.05039v2/page_3.png": "cc36fc3cfaf4a11b01a2556d27b7d543a36526fcecba22314de585e438b0749e",
+    "images/2303.05039v2/page_4.png": "e728ee834f56b3fe02ce336b3eca9954f48df44d1ef00a92c75ceca7d2b7609d",
+    "images/2303.05039v2/page_5.png": "6b4c0265b320f5a73750da65b7137280ad06608a6bdcc56b8317e24449fbed66",
+    "images/2303.05039v2/page_6.png": "de4243b8286f7036b2dbdb90f49a9ed2aeed1a7a1b1db223643a3bd37a3a0420",
+    "images/2303.05039v2/page_7.png": "c718fc7097d1332b1c31a05737fedf12f961e3e481c789d6c1ee8c09281fd2fb",
+    "images/2303.05039v2/page_8.png": "2cfd103bbe144ac5e84356e4143e1e5398c4cf70f3810ed7f10e131a26a80c1b",
+    "images/2310.07609v1/page_0.png": "0307c4f8742607612ea889fef0bed345b23b2cff8f1c8dba7e93647560a8f2c3",
+    "images/2310.07609v1/page_1.png": "04237213bd7ec7e93e829adcb90ff05d02b101cd148bcbd466ea18a7969d18ac",
+    "images/2310.07609v1/page_2.png": "ee87010da138caf25150e3f3d078fc39dabd8c1899f52781c39fa86e020caec7",
+    "images/2310.07609v1/page_3.png": "27dafd05fa9f6641d5e28f3a125b08a933b4f68e1f4b864f803e51a987dee7cc",
+    "images/2310.07609v1/page_4.png": "fdec03608d513605e268dabde21e8d24deffe86e3a87362eb2acea63f93273ca",
+    "images/2310.07609v1/page_5.png": "73e230b88f9b57f908ee907c44b408230d0798689175c64c9ab95316efd0b23e",
+    "images/2310.07609v1/page_6.png": "fa3694047acc28e47e044dd703595e55bcde0203c773f11fe7aa03b8f7dbc04f",
+    "images/2310.07609v1/page_7.png": "c6ac7506878a627b05231b7fb66c4c08d380f00b44be1d02ff57a4368858e380",
+    "images/2310.07609v1/page_8.png": "68f91968ccf292a3b68213dd07fd2b6bd86a849d6e7e91400456777e2917e1fc",
+    "images/2310.07609v1/page_9.png": "922a1f19128dd2597fcb8af4c5e02ba360320eb2ef05c7a81812f2f35795c96f",
+    "images_manifest.json": "4df3e3b67cb1f78fbe357cda94a4b59ae10891c55a1ffec02b2a0aa7c5f431bc",
+    "model_identity.json": "0ad8ab9b307fca4b5cf69f4c02033b4bd993e4a6f9950b8176c6c01d737be299",
+    "model_metadata/chat_template.jinja": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "model_metadata/config.json": "d0883072e01861ed0b2d47be3c16c36a8e81c224c7ffaa310c6558fb3f932b05",
+    "model_metadata/model.safetensors.index.json": "26d3539b516be613f39563617cb9d33b3f83d401298125be392c80cefb8f7fe5",
+    "model_metadata/tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8",
+    "original_effective_config.json": "3b32774ba8d57927bf3dca33b23160757ed9b54a5cf63e5308b7695cc338a615",
+    "settings.json": "89dff6fee699b68865c908995c5934d774fc0722ac9cbcf4ae9cffc5e8794c86",
+    "source_manifest.json": "6cffe30866b0a4c0c601f2594e97b7995510d6da872b010d298a9c9c897956f3"
+  }
+}

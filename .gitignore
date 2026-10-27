@@ -1,0 +1,24 @@
+# Original archive and root-level evaluation outputs
+/aaai_commit_20260803/
+/aaai_commit_20260803.zip
+/output/
+
+# Python bytecode and local caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated Agent runs and temporary test work
+/citeagent_v2/runs/
+/citeagent_v2/_test_work/
+/citeagent_v2/full_eval/_test_work/
+
+# Local credentials and machine configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store
