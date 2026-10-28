@@ -1,0 +1,18 @@
+{
+  "max_rounds": 15,
+  "read_page_max": 3,
+  "roles": {
+    "locator": {
+      "thinking": true
+    },
+    "reasoner": {
+      "thinking": false
+    },
+    "selector": {
+      "thinking": false
+    },
+    "extractor": {
+      "thinking": false
+    }
+  }
+}
