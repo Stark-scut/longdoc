@@ -22,3 +22,7 @@ __pycache__/
 *.pem
 *.key
 .DS_Store
+
+# External inputs and all generated results
+/data/
+/citeagent_v2/runs
