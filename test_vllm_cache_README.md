@@ -1,1 +1,0 @@
-examples/cache/README.md

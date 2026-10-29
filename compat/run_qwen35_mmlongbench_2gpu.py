@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Compatibility entry; implementation: examples/read_page_agent/run.py."""
+"""Compatibility entry; implementation: evaluations/direct_qa/run_qwen35_mmlongbench_2gpu.py."""
 import runpy
 import sys
 from pathlib import Path
-_target = Path(__file__).resolve().parent / 'examples/read_page_agent/run.py'
+_target = Path(__file__).resolve().parent.parent / 'evaluations/direct_qa/run_qwen35_mmlongbench_2gpu.py'
 sys.path.insert(0, str(_target.parent))
 if __name__ == "__main__":
     runpy.run_path(str(_target), run_name="__main__")

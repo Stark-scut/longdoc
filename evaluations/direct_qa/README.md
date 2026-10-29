@@ -27,13 +27,13 @@ conda activate qwen35
 cd /media/data1/leizh/longdoc
 
 # 只检查数据、分辨率、分片和命令，不启动服务。
-python run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --dry-run
+python evaluations/direct_qa/run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --dry-run
 
 # 先测试两题，每张卡一题。服务随脚本启动，完成后自动关闭。
-python run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --limit 2
+python evaluations/direct_qa/run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --limit 2
 
 # 同一目录继续全量评测，复用冒烟测试已完成的答案。
-python run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2
+python evaluations/direct_qa/run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2
 ```
 
 不自动终止其他服务。原有两卡 TP=2 服务如果仍占着所选 GPU，需要先在其终端结束，
@@ -44,7 +44,7 @@ python run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2
 即可显示已有任务的总体进度和 ETA，无需重新加载模型：
 
 ```bash
-python run_qwen35_mmlongbench_2gpu.py --watch
+python evaluations/direct_qa/run_qwen35_mmlongbench_2gpu.py --watch
 # 如原任务使用了自定义 output-dir 或 limit，监控时沿用。
 ```
 
@@ -85,10 +85,10 @@ GPU 利用率 100% 本身不能证明计算或内存带宽已被充分利用。
 
 ```bash
 # 先 Ctrl-C 停止原入口并等待退出，再用同一目录续跑：默认 offload=0，每卡并发 2。
-python run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --max-num-seqs 2 --concurrency 2
+python evaluations/direct_qa/run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --max-num-seqs 2 --concurrency 2
 
 # 若要从零评测，使用独立结果目录；先每卡测试一题。
-python run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --limit 2 \
+python evaluations/direct_qa/run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --limit 2 \
   --output-dir output/mmlongbench/qwen35_1024_gpu_only_fresh
 ```
 
@@ -118,7 +118,7 @@ python run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --limit 2 \
 也可以在任务停止后单独重新合并（如果使用过 limit，合并时沿用）：
 
 ```bash
-python run_qwen35_mmlongbench_2gpu.py --merge-only
+python evaluations/direct_qa/run_qwen35_mmlongbench_2gpu.py --merge-only
 ```
 
 可用 `--extractor-base-url`、`--extractor-model` 指定独立抽取器；也支持原来的
@@ -132,7 +132,7 @@ python run_qwen35_mmlongbench_2gpu.py --merge-only
 preemption 计数，不能仅据此断定重算次数。先停止旧入口，再以原结果目录测试：
 
 ```bash
-python run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --cpu-offload-gb 0 \
+python evaluations/direct_qa/run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --cpu-offload-gb 0 \
   --concurrency 4 --max-num-seqs 4 --max-num-batched-tokens 2048 \
   --mm-processor-cache-gb 1
 ```
@@ -153,7 +153,7 @@ python run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --cpu-offload-gb 0 \
 建议先在新目录跑同文档的若干题，核对答案、日志中的 Prefix cache hit rate 和吞吐：
 
 ```bash
-python run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --limit 10 \
+python evaluations/direct_qa/run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --limit 10 \
   --concurrency 4 --max-num-seqs 4 --mm-processor-cache-gb 1 \
   --enable-prefix-caching \
   --output-dir output/mmlongbench/qwen35_prefix_smoke
@@ -185,8 +185,8 @@ python run_qwen35_mmlongbench_2gpu.py --gpu-ids 1,2 --limit 10 \
 ```bash
 conda activate qwen35
 cd /media/data1/leizh/longdoc
-bash serve_qwen35_mmlongbench.sh
-# 换卡示例：GPU_IDS=4,6 bash serve_qwen35_mmlongbench.sh
+bash evaluations/direct_qa/serve_qwen35_mmlongbench.sh
+# 换卡示例：GPU_IDS=4,6 bash evaluations/direct_qa/serve_qwen35_mmlongbench.sh
 ```
 
 服务启动完成后，终端二：
@@ -194,10 +194,10 @@ bash serve_qwen35_mmlongbench.sh
 ```bash
 conda activate qwen35
 cd /media/data1/leizh/longdoc
-python evaluate_qwen35_mmlongbench.py --dry-run
-python evaluate_qwen35_mmlongbench.py --limit 2
+python evaluations/direct_qa/evaluate_qwen35_mmlongbench.py --dry-run
+python evaluations/direct_qa/evaluate_qwen35_mmlongbench.py --limit 2
 # 前两题跑通后评测全部；保留并跳过已完成的前两题。
-python evaluate_qwen35_mmlongbench.py
+python evaluations/direct_qa/evaluate_qwen35_mmlongbench.py
 ```
 
 相同命令可断点续跑；已生成回答会立即保存，抽取失败时重试不会重新生成回答。
@@ -210,9 +210,9 @@ python evaluate_qwen35_mmlongbench.py
 
 ```bash
 # 终端一，需先结束旧服务；修改脚本不会改变已经运行的服务。
-MAX_NUM_SEQS=8 bash serve_qwen35_mmlongbench.sh
+MAX_NUM_SEQS=8 bash evaluations/direct_qa/serve_qwen35_mmlongbench.sh
 # 终端二，原结果文件支持续跑。
-python evaluate_qwen35_mmlongbench.py --concurrency 16
+python evaluations/direct_qa/evaluate_qwen35_mmlongbench.py --concurrency 16
 ```
 
 长短文档耗时差异很大；提高 MAX_NUM_SEQS 会增加显存需求，不代表一定提速。
@@ -235,7 +235,7 @@ python evaluate_qwen35_mmlongbench.py --concurrency 16
 修改设置需要使用不同输出文件。例如：
 
 ```bash
-python evaluate_qwen35_mmlongbench.py --enable-thinking \
+python evaluations/direct_qa/evaluate_qwen35_mmlongbench.py --enable-thinking \
   --output output/mmlongbench/qwen35_thinking_comparison.json
 ```
 
@@ -254,7 +254,7 @@ python evaluate_qwen35_mmlongbench.py --enable-thinking \
 export EXTRACTOR_BASE_URL=http://YOUR_EXTRACTOR_HOST:PORT/v1
 export EXTRACTOR_MODEL=gpt-oss-120b
 # 如果抽取服务需要认证，另设置 EXTRACTOR_API_KEY；本地无认证服务可不设置。
-python evaluate_qwen35_mmlongbench.py \
+python evaluations/direct_qa/evaluate_qwen35_mmlongbench.py \
   --output output/mmlongbench/qwen35_gptoss_extractor.json
 ```
 
@@ -265,8 +265,8 @@ python evaluate_qwen35_mmlongbench.py \
 若需先生成，再用独立模型抽取：
 
 ```bash
-python evaluate_qwen35_mmlongbench.py --stage predict
-python evaluate_qwen35_mmlongbench.py --stage score \
+python evaluations/direct_qa/evaluate_qwen35_mmlongbench.py --stage predict
+python evaluations/direct_qa/evaluate_qwen35_mmlongbench.py --stage score \
   --extractor-base-url http://YOUR_EXTRACTOR_HOST:PORT/v1 \
   --extractor-model gpt-oss-120b
 ```

@@ -9,5 +9,5 @@
 | 缓存探测 | 使用已有服务 | python examples/cache/probe.py --help |
 
 这些是独立小示例。完整 Agent 使用 python -m agent，默认输出在 output/agent/。
-旧根目录命令保留为兼容入口，示例的各项参数见对应 README 或 --help。
+旧文件名入口已集中到 compat/，示例的各项参数见对应 README 或 --help。
 工具图片原图未包含在仓库中，需单独准备左黄右白原图并传 --image。

@@ -4,7 +4,7 @@
 
 ~~~bash
 conda activate qwen35
-python /media/data1/leizh/longdoc/reextract_mmlongbench_deepseek.py --concurrency 16
+python /media/data1/leizh/longdoc/evaluations/answer_extraction/reextract_mmlongbench_deepseek.py --concurrency 16
 ~~~
 
 若环境中没有 DEEPSEEK_API_KEY，交互终端会隐藏输入密钥；密钥不存进代码、文件、命令参数或日志。也可以通过已有安全方式将密钥设置到 DEEPSEEK_API_KEY。默认模型 deepseek-flash，thinking enabled，reasoning_effort high，与用户提供的 API 调用一致。
@@ -25,7 +25,7 @@ python /media/data1/leizh/longdoc/reextract_mmlongbench_deepseek.py --concurrenc
 
 离线测试（无真实 API 请求）：
 ~~~bash
-python /media/data1/leizh/longdoc/tests_reextract_mmlongbench_deepseek.py
+python /media/data1/leizh/longdoc/tests/test_answer_extraction.py
 ~~~
 
 API 文档：https://api-docs.deepseek.com/api/create-chat-completion/

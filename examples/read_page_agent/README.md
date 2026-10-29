@@ -12,7 +12,7 @@
 ```bash
 conda activate qwen35
 cd /media/data1/leizh/longdoc
-GPU_ID=1 bash serve_qwen35_read_page_agent_single_gpu.sh
+GPU_ID=1 bash examples/read_page_agent/serve_single_gpu.sh
 # 如果 GPU 1 被占用，指定另一张空闲卡，例如 GPU_ID=4。
 ```
 
@@ -20,7 +20,7 @@ GPU_ID=1 bash serve_qwen35_read_page_agent_single_gpu.sh
 没有启用自动工具解析，不能直接拿来跑这个多轮测试。
 `GPU_ID`、`PORT`、`MODEL_PATH`、`MAX_MODEL_LEN`、`MAX_IMAGES`、
 `MAX_NUM_BATCHED_TOKENS`、`CPU_OFFLOAD_GB` 和 `VLLM_GPU_MEMORY_UTILIZATION`
-可通过环境变量覆盖。兼容原来的 `serve_qwen35_read_page_agent.sh` 入口，
+可通过环境变量覆盖。兼容旧文件名入口 `compat/serve_qwen35_read_page_agent.sh`，
 现在也默认单卡；`GPU_IDS=1` 可用，`GPU_IDS=1,2` 会报错。
 服务前台运行，Ctrl-C 停止；启动命令与日志保存在 `output/read_page_agent/server_*/`。
 使用本机 `/tmp` 缓存，避开之前 NFS 上的 Triton 缓存问题。
@@ -36,8 +36,8 @@ GPU_ID=1 bash serve_qwen35_read_page_agent_single_gpu.sh
 如需两张卡各有一个独立副本，在两个终端分别启动：
 
 ```bash
-GPU_ID=1 PORT=8057 bash serve_qwen35_read_page_agent_single_gpu.sh
-GPU_ID=2 PORT=8058 bash serve_qwen35_read_page_agent_single_gpu.sh
+GPU_ID=1 PORT=8057 bash examples/read_page_agent/serve_single_gpu.sh
+GPU_ID=2 PORT=8058 bash examples/read_page_agent/serve_single_gpu.sh
 ```
 
 测试时用 `--base-url http://127.0.0.1:8058/v1` 选择第二个服务。
@@ -50,13 +50,13 @@ conda activate qwen35
 cd /media/data1/leizh/longdoc
 
 # 先检查默认题目和页图，不发 API 请求。
-python test_qwen35_read_page_agent.py --dry-run
+python examples/read_page_agent/run.py --dry-run
 
 # 单题验证：10 页文档，问题要求辨认示例图里的蓝色数字。
-python test_qwen35_read_page_agent.py --sample-indices 281 --k 2 --max-rounds 8 --show-thinking
+python examples/read_page_agent/run.py --sample-indices 281 --k 2 --max-rounds 8 --show-thinking
 
 # 默认 4 题，依次运行，每题使用独立的会话。
-python test_qwen35_read_page_agent.py --k 2 --max-rounds 8 --show-thinking
+python examples/read_page_agent/run.py --k 2 --max-rounds 8 --show-thinking
 ```
 
 `--k` 是一次最多读取的页数，模型可以少读；工具接受显式页号列表。

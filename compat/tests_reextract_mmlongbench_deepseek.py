@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Compatibility entry; implementation: training/grpo/rewards.py."""
+"""Compatibility entry; implementation: tests/test_answer_extraction.py."""
 import runpy
 import sys
 from pathlib import Path
-_target = Path(__file__).resolve().parent / 'training/grpo/rewards.py'
+_target = Path(__file__).resolve().parent.parent / 'tests/test_answer_extraction.py'
 sys.path.insert(0, str(_target.parent))
 if __name__ == "__main__":
     runpy.run_path(str(_target), run_name="__main__")

@@ -3,7 +3,7 @@
 import runpy
 import sys
 from pathlib import Path
-_target = Path(__file__).resolve().parent / 'evaluations/answer_extraction/reextract_mmlongbench_deepseek.py'
+_target = Path(__file__).resolve().parent.parent / 'evaluations/answer_extraction/reextract_mmlongbench_deepseek.py'
 sys.path.insert(0, str(_target.parent))
 if __name__ == "__main__":
     runpy.run_path(str(_target), run_name="__main__")

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Compatibility entry; implementation: evaluations/direct_qa/evaluate_qwen35_mmlongbench.py."""
+"""Compatibility entry; implementation: examples/cache/probe.py."""
 import runpy
 import sys
 from pathlib import Path
-_target = Path(__file__).resolve().parent / 'evaluations/direct_qa/evaluate_qwen35_mmlongbench.py'
+_target = Path(__file__).resolve().parent.parent / 'examples/cache/probe.py'
 sys.path.insert(0, str(_target.parent))
 if __name__ == "__main__":
     runpy.run_path(str(_target), run_name="__main__")

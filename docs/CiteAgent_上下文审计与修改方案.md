@@ -2,7 +2,7 @@
 
 日期：2026-10-23  
 审计目录：/media/data1/leizh/longdoc/aaai_commit_20260803/aaai_commit/citeagent  
-参考材料：[Agent规范.pdf](/media/data1/leizh/longdoc/Agent规范.pdf)，共 1 页。  
+参考材料：[Agent规范.pdf](/media/data1/leizh/longdoc/docs/references/Agent规范.pdf)，共 1 页。
 交付范围：代码审查、离线模板验证和修改设计；本次不修改任何代码，不启动模型或评测。
 
 ## 1. 核心结论

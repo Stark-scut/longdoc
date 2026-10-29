@@ -3,7 +3,7 @@
 当前 GPU 0 对应 http://127.0.0.1:8071/v1，模型名 citeagent-qwen35。测试仅调用现有服务，不部署、不终止服务、不清空缓存。默认 8 次顺序请求，关闭 thinking，每次最多生成 8 tokens。依赖当前 qwen35 环境的 httpx。
 
 ~~~bash
-python /media/data1/leizh/longdoc/test_vllm_cache.py
+python /media/data1/leizh/longdoc/examples/cache/probe.py
 ~~~
 
 报告写入 output/cache_probe/时间_随机标识.json。--base-url 可换端口；--image 可换本地图片（默认 a_tool_image.png）；--text-only 只测文本；--repeats 3 和 --lines 192 控制重复次数与共同前缀长度。
