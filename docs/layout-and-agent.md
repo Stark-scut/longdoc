@@ -1,4 +1,6 @@
-# 仓库整理与独立 Agent
+# 初始仓库整理与独立 Agent（历史版本）
+
+本页记录ef2d427的初始整理。当前流程与根目录清理见 [Locator直接选页](locator-direct-evidence.md)。
 
 分支：chore/repository-layout；整理前提交：4fa02af6e7bc3c4beb36ffef0c0146acfcb2c435。
 
@@ -31,7 +33,7 @@ data/ 与 output/ 不提交 Git。主分支原提交仍保留旧基线文件；�
 | test_grpo.sh / gsm8k_plugin.py | training/grpo/smoke.sh / rewards.py |
 | tests_reextract_mmlongbench_deepseek.py | tests/test_answer_extraction.py |
 
-根目录旧Python/shell文件是短兼容入口；旧文档位置是符号链接。新工作只维护实际实现。
+旧Python/shell兼容入口和文档符号链接现统一在compat/；新工作维护分类目录中的实际实现。
 按文件位置自动推导项目路径的程序已同步修正，GRPO奖励插件与训练脚本保持同目录。
 工具图片示例增加 --image 以支持新服务器的图片位置。
 

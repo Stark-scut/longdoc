@@ -22,8 +22,13 @@ class Page:
     blocks: list
     crops: dict
 
+    def locator_parts(self):
+        if not self.image.is_file():
+            raise Failure("image_unavailable", str(self.image))
+        return [{"type": "text", "text": f"page_index={self.index}"}, image_part(self.image)]
+
     def parts(self):
-        # This reorganization keeps the FULL observation format: page + OCR + crops.
+        # Full evidence belongs to Reasoner; Locator uses locator_parts instead.
         if not self.image.is_file():
             raise Failure("image_unavailable", str(self.image))
         parts = [{"type": "text", "text": f"page_index={self.index} full page image:"},
@@ -78,6 +83,9 @@ class Document:
             result.append({"page": index, "score": round(scores[index], 5),
                            "snippet": text[start:start + 360]})
         return result
+
+    def render_locator(self, indices):
+        return [part for index in indices for part in self.pages[index].locator_parts()]
 
     def render(self, indices):
         parts = []

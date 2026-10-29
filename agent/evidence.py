@@ -1,16 +1,18 @@
-"""Evidence admission and versioning, independent of conversation history."""
+"""Locator-selected evidence, replaced explicitly on every Reasoner invocation."""
 from .client import Failure
 
 class Evidence:
     def __init__(self, document):
         self.document, self.read_pages, self.pages, self.version = document, set(), set(), 0
 
-    def admit(self, pages):
-        if not isinstance(pages, list) or any(type(p) is not int or p not in self.read_pages for p in pages):
-            raise Failure("invalid_selection", "selected_pages must reference successfully read physical page indices")
-        previous = set(self.pages)
-        self.pages.update(pages)
-        if self.pages != previous:
+    def select(self, pages):
+        if (not isinstance(pages, list) or not pages or
+            any(type(p) is not int or p not in self.read_pages for p in pages)):
+            raise Failure("invalid_evidence_pages",
+                          "pages must be a nonempty list of successfully read 0-based page indices", True)
+        selected = set(pages)
+        if selected != self.pages:
+            self.pages = selected
             self.version += 1
         return sorted(self.pages)
 

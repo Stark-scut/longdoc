@@ -1,121 +1,109 @@
-# 独立长文档 Agent
+# Locator 直接选页的长文档 Agent
 
-本目录包含新 Agent 的全部程序、提示词和官方评分工具。不导入旧 Agent，不读取旧 baseline，不依赖旧目录中的 vendor。
+统一入口：从仓库根目录执行 `python -m agent`。本目录包含完整程序、提示词和官方评分工具，不依赖旧 Agent 或固定基线。
 
-## 分工
+## 当前流程
+
+```text
+Locator → search / read_page → call_reasoner(pages=[...]) → Reasoner
+```
+
+- read_page(pages=[3,8])：成功返回的 tool 消息只含两页的页号和整页图，保持原图；没有标题、OCR、crop或包含它们的JSON。
+- Locator 自己决定证据页；call_reasoner(pages=[3,8]) 将这两页交给Reasoner。没有Selector模块或隐藏选页请求。
+- Reasoner 从后台获取这些指定页的整页图、OCR和可用crop。
+- 每次调用明确替换证据集合。第二次只传[8]，就只用第8页；要保留旧页，需把它们一起传入。
+- 证据页必须已经成功read_page读取。空列表、未读页、非法页号会作为可纠正的工具错误返回，不调用Reasoner模型。
+- search 继续在OCR/caption上检索并返回简短摘要；初始大纲仍用于定位。这次精简针对read_page的返回内容。
+- 页面图像与原生assistant/tool历史仍持续保留，当前没有历史压缩。
+
+## 代码分工
 
 | 模块 | 职责 |
 | --- | --- |
-| cli.py / config.py | 统一命令、显式配置、输入校验 |
-| loop.py | Locator 原生 assistant/tool 历史，预算与停止原因 |
-| client.py | HTTP、thinking、重试、JSON 格式纠正及成本记录 |
-| documents.py | 页面、OCR、crop、大纲与 BM25 检索 |
-| tools.py | 工具 schema、参数校验和真实图像返回 |
-| evidence.py / selector.py | 已读页、正式证据和版本；相关页选择 |
-| reasoner.py | 基于正式证据回答或报告缺项 |
-| scoring.py / metrics/ | 短答案抽取、官方 ACC/F1；GT 只用于离线评分 |
-| evaluation.py | 代码与输入快照、隔离工作进程、逐题落盘 |
-| launcher.py | 单卡完整模型副本、多卡并发、进度、清理和续跑 |
-| logging.py | 原始请求响应、usage、工具观察、图片去重及回放 |
+| cli.py / config.py | 命令与配置校验 |
+| loop.py | 原生工具循环、历史与停止原因 |
+| client.py | thinking、HTTP、重试和JSON纠正 |
+| documents.py | 页面、OCR、crop与检索；Locator和Reasoner使用不同渲染接口 |
+| tools.py | search、read_page、call_reasoner的参数与返回 |
+| evidence.py / reasoner.py | 校验Locator指定的精确页集合，构造完整证据并作答 |
+| evaluation.py / launcher.py | 独立快照、多GPU副本、并发、进度与中断续跑 |
+| logging.py | 请求响应、成本、图像资源与回放 |
+| scoring.py / metrics/ | 短答案提取和官方ACC/F1；GT仅离线使用 |
 
-search/read_page → call_global_selector → call_reasoner；Reasoner 返回 answerable 后结束。
-当前 read_page 仍为**整页图＋OCR＋可用crop**，参数仍为 pages。图像与消息完整保留，当前不做历史压缩。
-只返回“整页图＋页号”的功能尚未加入，后续作为独立实验。
-
-## 配置与运行
-
-从仓库根目录执行：
+## 启动
 
 ```bash
 python -m pip install -r agent/requirements.txt
 
+# 只检查命令和输入路径，不启动GPU、不写结果
 python -m agent eval --config configs/agent/native.json \
-  --gpu-ids 1,4,5 --concurrency-per-gpu 1 \
-  --indices 53,63,66,464,522 --output-dir output/agent/smoke
+  --gpu-ids 0,1 --indices 53,63 --dry-run
 
-# 全量评测用新输出目录，并去掉 --indices
+# 小样本：每卡一份完整模型
 python -m agent eval --config configs/agent/native.json \
-  --gpu-ids 1,4,5 --concurrency-per-gpu 1 \
-  --output-dir output/agent/native_full
+  --gpu-ids 0,1 --concurrency-per-gpu 1 \
+  --indices 53,63,66,464,522 --output-dir output/agent/direct_pages_smoke
+
+# 全量另用新目录
+python -m agent eval --config configs/agent/native.json \
+  --gpu-ids 0,1 --concurrency-per-gpu 1 --output-dir output/agent/direct_pages_full
 ```
 
-每张卡完整 BF16 / TP=1，CPU offload=0；默认 Prefix caching 开启、MM processor cache=1 GiB、eager 开启。
-`--concurrency-per-gpu` 是每副本同时执行的题数，默认1；`--max-num-seqs` 默认取该值。先用低并发验证，再对照吞吐。
-图像按原文件发送，并预检 max_pixels 是否会触发分辨率缩减；不会为通过检查自动缩图。
+每卡BF16 / TP=1，CPU offload=0；Prefix caching默认启用，MM processor cache默认1GiB。
+任意GPU编号与数量均可，例如 --gpu-ids 1,4,5；--max-num-seqs默认取每卡并发。
+推理环境需另备兼容的vLLM、PyTorch、Transformers，客户端requirements不安装这些GPU组件。
 
-输入覆盖参数：`--data-dir`、`--samples`、`--blocks`、`--images-dir`、`--crop-root`、`--captions`、`--model-path`。
-角色默认 Locator thinking=true，其余false；可用 `--no-thinking` / `--reasoner-thinking` 覆盖。
-角色 URL、模型、max_tokens、timeout、key_env 均可在 JSON 配置中分别指定。相对文件路径按仓库根目录解析。
-仅设置 data_dir 会派生默认数据文件路径，逐文件参数再覆盖。配置不允许未知字段，防止参数拼错后静默失效。
+完整数据仍在原 aaai_commit_20260803/aaai_commit/data/mmlongbench 目录；用 --data-dir 和 --model-path 覆盖新服务器路径。
+逐项覆盖支持 --samples、--blocks、--images-dir、--crop-root、--captions。
+角色仅有Locator、Reasoner和extractor；Locator默认thinking=true，其余false，可用 --no-thinking、--reasoner-thinking调整。
 
-服务别名默认 `longdoc-qwen35`。使用已部署的旧服务时，显式指定其实际名称：
+默认服务模型名longdoc-qwen35。已有服务用实际名字：
 
 ```bash
 python -m agent doctor --base-url http://127.0.0.1:8067/v1 --model citeagent-qwen35
-
 python -m agent eval --no-serve \
   --base-url http://127.0.0.1:8067/v1 --model citeagent-qwen35 \
-  --indices 53,63 --output-dir output/agent/existing_service
+  --indices 53,63 --output-dir output/agent/direct_pages_existing
 ```
 
-多个已有本地服务可用 `--no-serve --ports 8071,8072`；按各端口分配请求，结束时不会关闭外部服务。
-不同 URL 的外部 extractor/Reasoner 不会被本地副本 URL 覆盖。
-只检查命令用 `--dry-run`；只冻结代码与输入用 `--prepare-only`。
+多已有服务用 --no-serve --ports 8071,8072；结束时不会关闭外部服务。
+不同URL的外部Reasoner/extractor不会被本地副本覆盖。
 
-单独运行一道自定义问题：
+## 输出与续跑
+
+所有结果默认在output/agent/，源码目录不写题集或运行输出。
+每次运行保存run_config.json、runtime.json、summary.json、merged.json、progress.json、
+snapshot/agent完整代码、snapshot/inputs题集/OCR/caption/图像哈希、
+server*/server.log、workers日志与心跳、samples逐题结果及attempt日志、assets真实图片。
+
+本版本使用**协议schema=2**，配置记录locator-direct-evidence和image-only。
+请用新输出目录；旧Selector运行的快照保留原状，不能混入本次续跑。
+相同配置和输出目录重复运行可续跑，允许调整GPU数量/编号、端口和并发。
+--retry-failed才重试已结束的失败题；QA成功但抽取失败时只重试抽取。
+改变题集、提示词或语义配置进行新实验时使用新输出目录。
+
+按一次Ctrl+C保存已生成的QA并清理本次启动的进程组。重复信号不会打断清理。
+技术失败、证据不足、轮数耗尽、截断和上下文超限分别记录；不把失败自动判为Not answerable。
 
 ```bash
-python -m agent run --doc-id 2310.05634v2.pdf \
-  --question "In figure 5, what is the color of the line that has no intersection with any other line?" \
-  --base-url http://127.0.0.1:8067/v1 --model citeagent-qwen35 \
-  --output-dir output/agent/question_63
-```
+python -m agent watch --output-dir output/agent/direct_pages_full
+python -m agent merge --output-dir output/agent/direct_pages_full
 
-## 输出、进度和恢复
-
-```text
-output/agent/native_full/
-  run_config.json               题集、模型标识、冻结文件哈希与配置指纹
-  runtime.json / run_history.jsonl
-  run_status.json               starting/running/stopping/finished/interrupted/failed
-  snapshot/agent/               本次完整独立代码，工作进程从这里运行
-  snapshot/inputs/              选定题集、相关OCR/caption、图像哈希；页图不复制
-  server0/server.log            每个模型副本的启动和服务日志
-  workers/replica0_slot0.log    每个并发槽位日志
-  workers/replica0_slot0.json   当前题目、轮次、角色与请求时间
-  samples/sample_0053/result.json
-  samples/sample_0053/attempt_0001.jsonl
-  assets/                      按内容哈希去重的真实图片
-  summary.json / merged.json / progress.json
-```
-
-终端显示进度、已判分/失败/未完成、吞吐、ETA 和活跃题目/轮次。
-已完成结果立即落盘；答案先于抽取保存。相同命令复用相同输出目录即可续跑。
-已结束的失败题默认不重跑；`--retry-failed` 才重试。QA成功但抽取失败时只重试抽取。
-可以更换 GPU 编号/数量、端口和并发，已保存的题目不会因此重跑。
-题集和语义配置变更必须使用新输出目录。旧实现的输出不能直接用于新 Agent 续跑。
-
-按一次 Ctrl+C 停止：工作进程先中断，已保存QA保留；随后清理本次创建的vLLM进程组。重复 Ctrl+C、SIGTERM、SIGHUP 不会打断清理阶段。
-最大轮数、模型输出截断、上下文超限和技术错误分别记录；技术失败不自动当作 Not answerable。
-
-```bash
-python -m agent watch --output-dir output/agent/native_full
-python -m agent merge --output-dir output/agent/native_full
-
-# 分阶段：第一阶段 agent 保存回答；第二阶段 all/score 完成提取
-python -m agent eval --gpu-ids 0,1 --stage agent --output-dir output/agent/staged
-python -m agent eval --gpu-ids 0,1 --stage score --output-dir output/agent/staged
+# 分阶段时，两次都使用相同配置和输出目录
+python -m agent eval --gpu-ids 0,1 --stage agent --output-dir output/agent/direct_pages_staged
+python -m agent eval --gpu-ids 0,1 --stage score --output-dir output/agent/direct_pages_staged
 
 python -m agent replay \
-  --trace output/agent/native_full/samples/sample_0053/attempt_0001.jsonl \
+  --trace output/agent/direct_pages_full/samples/sample_0053/attempt_0001.jsonl \
   --sequence 2 --output output/agent/restored_request.json
 ```
 
-回放 sequence 必须指向实际 llm_request；恢复请求但不发送。日志保存 reasoning、tool_calls、结束原因和费用；不记录授权请求头。
-未处理、未完成和技术失败按固定题集分母计零；完成运行不等于全部成功判分。ACC 是官方 score 均值，F1 沿用官方汇总公式。
+sequence须对应实际llm_request；回放不发送请求。
+日志保留reasoning、tool_calls、调用ID、结束原因和实际成本，不记录授权请求头。
+未处理、未完成及技术失败按固定题集分母计零；官方列表等边界情况报明确评分错误。
 
-## 与旧系统的关系
+## 与此前版本对照
 
-独立实现保留同类能力，但提示词、BM25细节、工具返回布局与技术失败处理不是逐token等价迁移。
-Selector 输入未变化时复用选择；不可恢复的结构错误直接记录真实原因，不再通过重复调用掩盖成轮数耗尽。
-这些差异已列在 [迁移说明](../docs/layout-and-agent.md)，不可把新旧分数差直接归因为某一个变量。
+带Selector、完整Locator读页观察的版本保留在chore/repository-layout分支（ef2d427）。
+本次同时改变证据选择和Locator读页内容，准确率/速度变化不能归因于其中单个因素。
+离线测试验证工程行为；真实模型小样本评测需另行启动，说明见 [本次变更](../docs/locator-direct-evidence.md)。

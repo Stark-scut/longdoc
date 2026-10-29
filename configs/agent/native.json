@@ -8,11 +8,11 @@
     "reasoner": {
       "thinking": false
     },
-    "selector": {
-      "thinking": false
-    },
     "extractor": {
       "thinking": false
     }
-  }
+  },
+  "schema": 2,
+  "pipeline": "locator-direct-evidence",
+  "locator_read_page_format": "image-only"
 }

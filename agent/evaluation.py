@@ -81,7 +81,7 @@ def prepare(root, config, cases):
                 identity["metadata"][name] = sha(p)
         identity["weights"] = {p.name: [p.stat().st_size, p.stat().st_mtime_ns] for p in model.glob("*.safetensors")}
     snapshot_files = {str(p.relative_to(snapshot)): sha(p) for p in sorted(snapshot.rglob("*")) if p.is_file()}
-    run = {"schema": 1, "implementation": "standalone-agent", "config": config,
+    run = {"schema": 2, "implementation": "standalone-agent", "config": config,
            "model_identity": identity, "snapshot_files": snapshot_files,
            "total": len(cases), "created_at": stamp()}
     run["fingerprint"] = fingerprint({"config": config, "files": snapshot_files, "model": identity})
@@ -90,8 +90,8 @@ def prepare(root, config, cases):
 
 def verify(root, run, config=None):
     root = Path(root)
-    if run.get("implementation") != "standalone-agent":
-        raise ValueError("This output belongs to another implementation")
+    if run.get("implementation") != "standalone-agent" or run.get("schema") != 2:
+        raise ValueError("Output uses a different Agent protocol; use a new directory or the original code branch")
     if config is not None and config != run["config"]:
         raise ValueError("Configuration differs from saved run; use its config or a new output directory")
     for name, expected in run["snapshot_files"].items():

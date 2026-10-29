@@ -6,7 +6,7 @@ python tests/test_answer_extraction.py
 ```
 
 新 Agent 测试使用合成小图片、httpx MockTransport 和本地模拟 HTTP 服务：
-原生消息与调用ID、历史图片、thinking、预算与错误、JSON重试成本、
+原生消息与调用ID、纯图片读页、Locator直接指定证据、无Selector、历史图片、thinking、预算与错误、JSON重试成本、
 图片回放、无旧代码依赖、独立快照、配置路径、任意GPU分配、多端口服务、
 源码包脱离旧仓库运行、图片变更、并发/续跑、抽取重试、Ctrl+C及重复信号清理、GT隔离。
 

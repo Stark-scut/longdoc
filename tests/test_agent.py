@@ -41,8 +41,6 @@ def role_of(body):
     if body.get("tools"):
         return "locator"
     system = body["messages"][0]["content"]
-    if system.startswith("Select pages"):
-        return "selector"
     if system.startswith("Answer the question"):
         return "reasoner"
     return "extractor"
@@ -74,11 +72,8 @@ class Fixture:
                     fixture.requests.append((role, body))
                 if role == "locator":
                     step = sum(m["role"] == "tool" for m in body["messages"])
-                    name, args = [("read_page", {"pages": [0]}), ("call_global_selector", {}),
-                                  ("call_reasoner", {})][min(step, 2)]
+                    name, args = [("read_page", {"pages": [0]}), ("call_reasoner", {"pages": [0]})][min(step, 1)]
                     self.send(200, reply(tool(name, args, "call_" + str(step)), "tool_calls"))
-                elif role == "selector":
-                    self.send(200, reply({"role": "assistant", "content": '{"selected_pages":[0]}'}))
                 elif role == "reasoner":
                     self.send(200, reply({"role": "assistant", "content": '{"status":"answerable","answer":"red"}'}))
                 else:
@@ -136,31 +131,34 @@ class Base(unittest.TestCase):
             client.close()
 
 class Contracts(Base):
-    def test_native_history_images_reasoning_and_no_duplicate_selection(self):
+    def test_locator_image_only_history_and_direct_reasoner(self):
         requests = []
         def handler(request):
-            b = json.loads(request.content); role = role_of(b); requests.append((role, b))
+            body = json.loads(request.content); role = role_of(body); requests.append((role, body))
             if role == "locator":
-                n = sum(m["role"] == "tool" for m in b["messages"])
-                name, args = [("read_page", {"pages": [0]}), ("call_global_selector", {}),
-                              ("call_reasoner", {})][n]
-                return httpx.Response(200, json=reply(tool(name, args, "id" + str(n)), "tool_calls"))
-            if role == "selector":
-                return httpx.Response(200, json=reply({"role": "assistant", "content": '{"selected_pages":[0]}'}))
+                count = sum(m["role"] == "tool" for m in body["messages"])
+                name = "read_page" if count == 0 else "call_reasoner"
+                return httpx.Response(200, json=reply(tool(name, {"pages": [0]}, "id" + str(count)), "tool_calls"))
+            self.assertEqual(role, "reasoner")
             return httpx.Response(200, json=reply({"role": "assistant", "content": '{"status":"answerable","answer":"red"}'}))
         result, audit = self.run_agent(handler)
         self.assertEqual(result["raw_answer"], "red")
         self.assertTrue(result["protocol_valid"])
-        self.assertEqual(audit.requests["selector"], 1)
-        history = [b for r,b in requests if r == "locator"][-1]["messages"]
+        self.assertNotIn("selector", audit.requests)
+        self.assertEqual(audit.requests["locator"], 2)
+        history = [body for role, body in requests if role == "locator"][-1]["messages"]
         validate_history(history)
         observation = next(m for m in history if m["role"] == "tool")
         self.assertEqual(observation["tool_call_id"], "id0")
-        self.assertIn("OCR_SENTINEL", json.dumps(observation))
-        self.assertEqual(sum(p["type"] == "image_url" for p in observation["content"]), 2)
+        self.assertEqual([p["type"] for p in observation["content"]], ["text", "image_url"])
+        self.assertEqual(observation["content"][0]["text"], "page_index=0")
+        self.assertNotIn("OCR_SENTINEL", json.dumps(history))
+        reasoner_body = next(body for role, body in requests if role == "reasoner")
+        self.assertIn("OCR_SENTINEL", json.dumps(reasoner_body))
+        self.assertEqual(sum(p.get("type") == "image_url" for p in reasoner_body["messages"][1]["content"]), 2)
         self.assertEqual(next(m for m in history if m["role"] == "assistant")["reasoning"], "Inspect the evidence.")
-        self.assertEqual(next(b for r,b in requests if r == "locator")["chat_template_kwargs"], {"enable_thinking": True})
-        self.assertEqual(next(b for r,b in requests if r == "reasoner")["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertEqual(requests[0][1]["chat_template_kwargs"], {"enable_thinking": True})
+        self.assertEqual(reasoner_body["chat_template_kwargs"], {"enable_thinking": False})
 
     def test_budget_and_technical_error_are_distinct(self):
         self.config["max_rounds"] = 1
@@ -176,29 +174,32 @@ class Contracts(Base):
 
     def test_invalid_reasoner_type_stops_with_real_cause(self):
         def handler(req):
-            body = json.loads(req.content); role = role_of(body)
-            if role == "locator":
-                n = sum(m["role"] == "tool" for m in body["messages"])
-                return httpx.Response(200, json=reply(tool("read_page" if n==0 else "call_reasoner",
-                    {"pages":[0]} if n==0 else {}, "id"+str(n)), "tool_calls"))
-            value = {"selected_pages":[0]} if role=="selector" else {"status":"answerable","answer":["2005","2006"]}
-            return httpx.Response(200, json=reply({"role":"assistant","content":json.dumps(value)}))
+            body = json.loads(req.content)
+            if role_of(body) == "locator":
+                count = sum(m["role"] == "tool" for m in body["messages"])
+                return httpx.Response(200, json=reply(tool("read_page" if count == 0 else "call_reasoner",
+                    {"pages": [0]}, "id" + str(count)), "tool_calls"))
+            return httpx.Response(200, json=reply({"role": "assistant", "content": '{"status":"answerable","answer":["2005","2006"]}'}))
         result, audit = self.run_agent(handler)
         self.assertEqual(result["stop_reason"], "invalid_reasoner_answer")
         self.assertEqual(audit.requests["reasoner"], 1)
+        self.assertNotIn("selector", audit.requests)
 
     def test_json_retry_is_explicit_and_fully_costed(self):
         self.config["json_attempts"] = 2
-        audit = Audit(self.root / "json/trace.jsonl"); attempts=[]
+        audit = Audit(self.root / "json/trace.jsonl"); attempts = []
         def handler(req):
-            body=json.loads(req.content);attempts.append(body)
-            value = '{"selected_pages":[0]' if len(attempts)==1 else '{"selected_pages":[0]}'
-            return httpx.Response(200,json=reply({"role":"assistant","content":value}))
-        client=Client(self.config,audit,httpx.MockTransport(handler))
-        try:self.assertEqual(client.json("selector",[{"role":"user","content":"select"}]),{"selected_pages":[0]})
-        finally:client.close()
-        self.assertEqual(audit.requests["selector"],2)
-        self.assertEqual(len(attempts[1]["messages"]),3)
+            attempts.append(json.loads(req.content))
+            value = '{"status":"answerable","answer":"red"' if len(attempts) == 1 else '{"status":"answerable","answer":"red"}'
+            return httpx.Response(200, json=reply({"role": "assistant", "content": value}))
+        client = Client(self.config, audit, httpx.MockTransport(handler))
+        try:
+            self.assertEqual(client.json("reasoner", [{"role": "user", "content": "reason"}]),
+                             {"status": "answerable", "answer": "red"})
+        finally:
+            client.close()
+        self.assertEqual(audit.requests["reasoner"], 2)
+        self.assertEqual(len(attempts[1]["messages"]), 3)
 
     def test_replay_restores_real_images_and_checks_hash(self):
         audit=Audit(self.root/"replay/trace.jsonl")
@@ -265,21 +266,20 @@ class Contracts(Base):
 
     def test_parallel_ids_resolved_when_reasoner_finishes(self):
         def handler(req):
-            b=json.loads(req.content);role=role_of(b)
-            if role=="locator":
-                count=sum(m["role"]=="tool" for m in b["messages"])
-                message=tool("read_page",{"pages":[0]},"read") if count==0 else tool("call_reasoner",{},"reason")
+            body = json.loads(req.content)
+            if role_of(body) == "locator":
+                count = sum(m["role"] == "tool" for m in body["messages"])
+                message = tool("read_page", {"pages": [0]}, "read") if count == 0 else tool("call_reasoner", {"pages": [0]}, "reason")
                 if count:
-                    message["tool_calls"].extend(tool("search",{"query":"extra"},"skip")["tool_calls"])
-                return httpx.Response(200,json=reply(message,"tool_calls"))
-            value={"selected_pages":[0]} if role=="selector" else {"status":"answerable","answer":"red"}
-            return httpx.Response(200,json=reply({"role":"assistant","content":json.dumps(value)}))
-        result,audit=self.run_agent(handler)
-        self.assertEqual(result["execution_status"],"completed")
-        events=[json.loads(v) for v in audit.path.read_text().splitlines()]
-        history=next(e for e in reversed(events) if e["event"]=="history_checkpoint")["messages"]
+                    message["tool_calls"].extend(tool("search", {"query": "extra"}, "skip")["tool_calls"])
+                return httpx.Response(200, json=reply(message, "tool_calls"))
+            return httpx.Response(200, json=reply({"role": "assistant", "content": '{"status":"answerable","answer":"red"}'}))
+        result, audit = self.run_agent(handler)
+        self.assertEqual(result["execution_status"], "completed")
+        events = [json.loads(line) for line in audit.path.read_text().splitlines()]
+        history = next(e for e in reversed(events) if e["event"] == "history_checkpoint")["messages"]
         validate_history(history)
-        self.assertEqual(history[-1]["tool_call_id"],"skip")
+        self.assertEqual(history[-1]["tool_call_id"], "skip")
 
     def test_repeated_signals_do_not_interrupt_process_cleanup(self):
         code = """import subprocess,sys,time,signal
@@ -315,6 +315,116 @@ finally:
                 try:os.killpg(child_pid,signal.SIGKILL)
                 except ProcessLookupError:pass
             proc.stdout.close();proc.stderr.close()
+
+
+    def test_multiple_page_read_returns_only_indices_and_full_images(self):
+        from agent.evidence import Evidence
+        from agent.tools import Tools
+        audit = Audit(self.root / "read/trace.jsonl")
+        client = Client(self.config, audit, httpx.MockTransport(lambda req: self.fail("read_page called a model")))
+        evidence = Evidence(self.documents["doc.pdf"])
+        try:
+            message, outcome = Tools("question", evidence, client, audit, self.config).execute(
+                tool("read_page", {"pages": [1, 0]}, "read")["tool_calls"][0])
+        finally:
+            client.close()
+        self.assertTrue(outcome["ok"])
+        self.assertEqual(message["role"], "tool")
+        self.assertEqual(message["tool_call_id"], "read")
+        self.assertEqual([p["type"] for p in message["content"]], ["text", "image_url", "text", "image_url"])
+        self.assertEqual([p["text"] for p in message["content"] if p["type"] == "text"],
+                         ["page_index=1", "page_index=0"])
+        encoded = json.dumps(message)
+        self.assertNotIn("OCR_SENTINEL", encoded)
+        self.assertNotIn("Colors", encoded)
+        self.assertNotIn("crop", encoded)
+        self.assertEqual(evidence.read_pages, {0, 1})
+        self.assertEqual(evidence.pages, set())
+
+    def test_reasoner_rejects_missing_empty_unread_and_invalid_pages(self):
+        from agent.evidence import Evidence
+        from agent.tools import Tools
+        audit = Audit(self.root / "invalid/trace.jsonl")
+        client = Client(self.config, audit, httpx.MockTransport(lambda req: self.fail("Invalid evidence reached model")))
+        evidence = Evidence(self.documents["doc.pdf"])
+        evidence.read_pages.add(0); evidence.select([0])
+        tools = Tools("question", evidence, client, audit, self.config)
+        try:
+            for args in ({}, {"pages": []}, {"pages": [1]}, {"pages": [999]}, {"pages": ["0"]},
+                         {"pages": [True]}, {"pages": [0], "extra": 1}):
+                message, outcome = tools.execute(tool("call_reasoner", args, "invalid")["tool_calls"][0])
+                self.assertFalse(outcome["ok"], args)
+                self.assertTrue(outcome["error"]["retryable"])
+                self.assertEqual(evidence.pages, {0})
+                self.assertEqual(audit.requests["reasoner"], 0)
+                self.assertEqual(message["tool_call_id"], "invalid")
+        finally:
+            client.close()
+
+    def test_each_reasoner_call_uses_exact_replacement_page_set(self):
+        requests = []
+        reasoner_calls = []
+        def handler(req):
+            body = json.loads(req.content); role = role_of(body); requests.append((role, body))
+            if role == "locator":
+                step = sum(m["role"] == "tool" for m in body["messages"])
+                name, pages = [("read_page", [0, 1]), ("call_reasoner", [0]), ("call_reasoner", [1])][step]
+                return httpx.Response(200, json=reply(tool(name, {"pages": pages}, "id"+str(step)), "tool_calls"))
+            self.assertEqual(role, "reasoner"); reasoner_calls.append(body)
+            result = {"status":"insufficient","missing":[{"missing_claim":"Need detail page","search_hint":"details"}]} if len(reasoner_calls)==1 else {"status":"answerable","answer":"white"}
+            return httpx.Response(200, json=reply({"role":"assistant","content":json.dumps(result)}))
+        result, audit = self.run_agent(handler)
+        self.assertEqual(result["raw_answer"], "white")
+        self.assertEqual(result["evidence_pages"], [1])
+        self.assertEqual(result["read_pages"], [0, 1])
+        self.assertEqual(result["evidence_version"], 2)
+        self.assertIn("OCR_SENTINEL", json.dumps(reasoner_calls[0]))
+        self.assertNotIn("OCR_SENTINEL", json.dumps(reasoner_calls[1]))
+        self.assertNotIn("page_index=0", json.dumps(reasoner_calls[1]))
+        self.assertEqual(sum(p["type"]=="image_url" for p in reasoner_calls[1]["messages"][1]["content"]), 1)
+        history = [body for role, body in requests if role=="locator"][-1]["messages"]
+        self.assertNotIn("OCR_SENTINEL", json.dumps(history))
+        self.assertEqual(sum(p["type"]=="image_url" for m in history if m["role"]=="tool"
+                             for p in (m["content"] if isinstance(m["content"],list) else [])), 2)
+        self.assertNotIn("selector", audit.requests)
+
+    def test_unread_evidence_can_be_corrected_by_locator(self):
+        calls = []
+        def handler(req):
+            body=json.loads(req.content);role=role_of(body);calls.append((role,body))
+            if role=="locator":
+                step=sum(m["role"]=="tool" for m in body["messages"])
+                name=["call_reasoner","read_page","call_reasoner"][step]
+                return httpx.Response(200,json=reply(tool(name,{"pages":[0]},"id"+str(step)),"tool_calls"))
+            return httpx.Response(200,json=reply({"role":"assistant","content":'{"status":"answerable","answer":"red"}'}))
+        result,audit=self.run_agent(handler)
+        self.assertEqual(result["execution_status"],"completed")
+        self.assertEqual(audit.requests["reasoner"],1)
+        second=[body for role,body in calls if role=="locator"][1]
+        self.assertIn("invalid_evidence_pages",json.dumps(second))
+
+    def test_schema_has_no_selector_and_requires_explicit_pages(self):
+        from agent.tools import schemas
+        from agent.config import ROLES
+        definitions={s["function"]["name"]:s["function"] for s in schemas(3)}
+        self.assertEqual(set(definitions),{"search","read_page","call_reasoner"})
+        self.assertEqual(definitions["call_reasoner"]["parameters"]["required"],["pages"])
+        self.assertNotIn("selector",ROLES)
+        self.assertFalse((ROOT/"agent/selector.py").exists())
+        self.assertFalse((ROOT/"agent/prompts/selector.txt").exists())
+
+    def test_old_protocol_output_cannot_resume_as_new_mode(self):
+        output=self.root/"old_protocol"
+        run=prepare(output,self.config,select_cases(self.config["samples"],"0"))
+        run["schema"]=1
+        with self.assertRaisesRegex(ValueError,"different Agent protocol"):
+            verify(output,run,self.config)
+
+    def test_root_has_no_scripts_and_compat_runs_from_another_directory(self):
+        self.assertFalse([p.name for p in ROOT.iterdir() if p.suffix in {".py",".sh"}])
+        command=[sys.executable,str(ROOT/"compat/test_vllm_cache.py"),"--help"]
+        result=subprocess.run(command,cwd=self.root,capture_output=True,text=True,timeout=15)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
 class Integration(Base):
     def setUp(self):

@@ -8,7 +8,7 @@ Qwen3.5 长文档 Agent、MMLongBench 评测及配套实验。
 ## 从这里开始
 
 ```bash
-git clone --branch chore/repository-layout https://github.com/Stark-scut/longdoc.git
+git clone --branch feat/locator-direct-evidence https://github.com/Stark-scut/longdoc.git
 cd longdoc
 python -m pip install -r agent/requirements.txt
 python -m agent --help
@@ -20,11 +20,11 @@ python -m agent eval --config configs/agent/native.json \
 # 小样本：每张卡部署一份完整模型
 python -m agent eval --config configs/agent/native.json \
   --gpu-ids 0,1 --indices 53,63,66,464,522 \
-  --concurrency-per-gpu 1 --output-dir output/agent/smoke
+  --concurrency-per-gpu 1 --output-dir output/agent/direct_pages_smoke
 
 # 全量：另用一个输出目录
 python -m agent eval --config configs/agent/native.json \
-  --gpu-ids 0,1 --concurrency-per-gpu 1 --output-dir output/agent/native_full
+  --gpu-ids 0,1 --concurrency-per-gpu 1 --output-dir output/agent/direct_pages_full
 ```
 
 根据实际空闲卡修改 GPU 编号。客户端 requirements 不安装 vLLM、PyTorch、Transformers 或训练环境；模型部署需要另外准备兼容的推理环境。已有环境记录在本机 `data/baselines/citeagent_v2/environment.json`，不随此分支的代码克隆。
@@ -45,7 +45,9 @@ python -m agent eval --config configs/agent/native.json \
 | data/baselines/ | 本机固定基线；Git 忽略 |
 | output/ | 全部新旧运行输出；Git 忽略 |
 
-根目录原来的脚本只保留短兼容入口或文档链接，实际实现已经归类。新增工作优先使用上表中的位置。
+根目录不再保留测试、训练或评测脚本。旧兼容入口和文档链接统一在 [compat/](compat/README.md)，正式实现见上表。
+
+当前Agent流程：Locator调用read_page只收到整页图和页号；通过call_reasoner(pages=[...])直接指定证据页。没有Selector。Reasoner仍收到指定页的整页图、OCR和crop。旧模式输出保持原状，新模式请用新的输出目录。
 
 ## 数据与模型
 
@@ -66,7 +68,7 @@ aaai_commit_20260803/aaai_commit/data/mmlongbench/
 ```bash
 python -m agent eval --config configs/agent/native.json \
   --data-dir /path/to/mmlongbench --model-path /path/to/Qwen3.5-9B \
-  --gpu-ids 1,4,5 --output-dir output/agent/native_full
+  --gpu-ids 1,4,5 --output-dir output/agent/direct_pages_full
 ```
 
 新 Agent 的评分脚本和提示词自带，**不需要旧归档中的 Agent 或评分代码**。
@@ -76,7 +78,7 @@ python -m agent eval --config configs/agent/native.json \
 本机旧路径 `citeagent_v2/baseline`、`citeagent_v2/runs` 通过兼容链接访问；后者不提交 Git。
 完整数据目录与约52GB的 ZIP 保持原位，不入 Git。新服务器克隆本分支不包含旧基线数据或结果；需要复跑旧实验时再单独同步。
 
-API 密钥通过环境变量设置，不写到配置：`CITEAGENT_LOCATOR_API_KEY`、`CITEAGENT_SELECTOR_API_KEY`、`CITEAGENT_REASONER_API_KEY`、`CITEAGENT_EXTRACTOR_API_KEY`；DeepSeek 重提取使用其脚本约定的环境变量。
+API 密钥通过环境变量设置，不写到配置：`CITEAGENT_LOCATOR_API_KEY`、`CITEAGENT_REASONER_API_KEY`、`CITEAGENT_EXTRACTOR_API_KEY`；DeepSeek 重提取使用其脚本约定的环境变量。
 
 ## 验证
 
