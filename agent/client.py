@@ -31,7 +31,7 @@ class Client:
         self.http = httpx.Client(transport=transport, trust_env=False)
     def close(self):
         self.http.close()
-    def complete(self, role, messages, tools=None):
+    def complete(self, role, messages, tools=None, *, tool_choice=None):
         spec = self.config["roles"][role]
         body = {"model": spec["model"], "messages": copy.deepcopy(messages),
                 "max_tokens": spec["max_tokens"], "temperature": 0, "seed": self.config["seed"],
@@ -40,7 +40,9 @@ class Client:
             body["mm_processor_kwargs"] = {"min_pixels": self.config["min_pixels"],
                                            "max_pixels": self.config["max_pixels"]}
         if tools is not None:
-            body.update(tools=tools, tool_choice="auto", parallel_tool_calls=True)
+            choice = tool_choice if tool_choice is not None else (
+                self.config["locator_tool_choice"] if role == "locator" else "auto")
+            body.update(tools=tools, tool_choice=copy.deepcopy(choice), parallel_tool_calls=True)
         for attempt in range(self.config["request_attempts"]):
             remaining = None if self.deadline is None else self.deadline - time.monotonic()
             if remaining is not None and remaining <= 0:

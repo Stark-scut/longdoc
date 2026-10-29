@@ -300,7 +300,9 @@ def launch(args, config):
                 for cache in caches:
                     shutil.rmtree(cache, ignore_errors=True)
                 summary = aggregate(root, args.stage, True)
-                bar.update(summary["processed"] - bar.n); bar.close()
+                bar.update(summary["processed"] - bar.n)
+                bar.set_postfix_str(f"scored={summary['scored']} errors={summary['errors']} incomplete={summary['incomplete']} pending={summary['pending']}")
+                bar.close()
                 status.update(status="interrupted" if interrupted else "failed" if failure or cleanup_errors else "finished",
                               error=failure, cleanup_errors=cleanup_errors, updated_at=stamp())
                 atomic(root / "run_status.json", status)

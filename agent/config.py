@@ -16,6 +16,7 @@ def defaults():
         "crop_root": str(data / "visual_crops"), "captions": str(data / "crop_captions.jsonl"),
         "model_path": str(ROOT.parent / "models/Qwen3.5-9B"),
         "max_rounds": 15, "read_page_max": 3, "wall_seconds": 3600,
+        "locator_tool_choice": "required", "max_protocol_corrections": 2,
         "request_attempts": 2, "json_attempts": 2, "seed": 42,
         "max_model_len": 65536, "max_pixels": 1048576, "min_pixels": 1024,
         "roles": {role: {"url": "http://127.0.0.1:8071/v1", "model": "longdoc-qwen35",
@@ -55,6 +56,10 @@ def validate(config):
                  "max_model_len", "max_pixels", "min_pixels"):
         if type(config[name]) is not int or config[name] < 1:
             raise ValueError(name + " must be a positive integer")
+    if config["locator_tool_choice"] not in {"required", "auto"}:
+        raise ValueError("locator_tool_choice must be required or auto")
+    if type(config["max_protocol_corrections"]) is not int or not 0 <= config["max_protocol_corrections"] <= 4:
+        raise ValueError("max_protocol_corrections must be in 0..4")
     if config["wall_seconds"] <= 0 or config["min_pixels"] > config["max_pixels"]:
         raise ValueError("Invalid wall/pixel budget")
     for role, spec in config["roles"].items():

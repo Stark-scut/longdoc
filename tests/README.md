@@ -12,3 +12,5 @@ python tests/test_answer_extraction.py
 
 不部署vLLM，不加载GPU模型，不调用收费API。临时数据和结果放系统临时目录，退出后清理。
 旧兼容性测试仍可运行 citeagent_v2/full_eval/tests.py，需要单独准备旧基线及旧评测资源。
+
+提前结束回归另覆盖：required/指定工具请求、无证据先取证、纠正上限、最后一轮预算、草稿保留、Reasoner独立输入、完整费用记录，以及禁用纠正的对照配置。

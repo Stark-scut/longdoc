@@ -20,7 +20,7 @@ python -m agent eval --config configs/agent/native.json \
 # 小样本：每张卡部署一份完整模型
 python -m agent eval --config configs/agent/native.json \
   --gpu-ids 0,1 --indices 53,63,66,464,522 \
-  --concurrency-per-gpu 1 --output-dir output/agent/direct_pages_smoke
+  --concurrency-per-gpu 1 --output-dir output/agent/direct_pages_smoke_v2
 
 # 全量：另用一个输出目录
 python -m agent eval --config configs/agent/native.json \
@@ -47,7 +47,7 @@ python -m agent eval --config configs/agent/native.json \
 
 根目录不再保留测试、训练或评测脚本。旧兼容入口和文档链接统一在 [compat/](compat/README.md)，正式实现见上表。
 
-当前Agent流程：Locator调用read_page只收到整页图和页号；通过call_reasoner(pages=[...])直接指定证据页。没有Selector。Reasoner仍收到指定页的整页图、OCR和crop。旧模式输出保持原状，新模式请用新的输出目录。
+当前Agent流程：Locator调用read_page只收到整页图和页号；通过call_reasoner(pages=[...])直接指定证据页。没有Selector。Reasoner仍收到指定页的整页图、OCR和crop。旧模式输出保持原状，新模式请用新的输出目录。Locator默认要求工具调用；提前输出普通答案时进行有上限、有成本记录的协议纠正，最终仍由Reasoner作答。
 
 ## 数据与模型
 

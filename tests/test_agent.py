@@ -426,6 +426,97 @@ finally:
         result=subprocess.run(command,cwd=self.root,capture_output=True,text=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
+
+    def test_premature_locator_answer_routes_to_independent_reasoner(self):
+        requests = []
+        def handler(req):
+            body = json.loads(req.content); role = role_of(body); requests.append((role, body))
+            if role == "locator":
+                turns = sum(1 for r, _ in requests if r == "locator")
+                if turns == 1:
+                    return httpx.Response(200, json=reply(tool("read_page", {"pages": [0]}, "read"), "tool_calls"))
+                if turns == 2:
+                    return httpx.Response(200, json=reply({"role":"assistant","content":"WRONG_LOCATOR_DRAFT"}))
+                self.assertEqual(body["tool_choice"], {"type":"function","function":{"name":"call_reasoner"}})
+                # vLLM named tool calls may legitimately have finish_reason=stop.
+                return httpx.Response(200, json=reply(tool("call_reasoner", {"pages":[0]}, "model_selected_pages"), "stop"))
+            self.assertEqual(role, "reasoner")
+            self.assertNotIn("WRONG_LOCATOR_DRAFT", json.dumps(body))
+            self.assertIn("OCR_SENTINEL", json.dumps(body))
+            return httpx.Response(200, json=reply({"role":"assistant","content":'{"status":"answerable","answer":"red"}'}))
+        result, audit = self.run_agent(handler)
+        self.assertEqual(result["raw_answer"], "red")
+        self.assertEqual(result["stop_reason"], "reasoner_answerable")
+        self.assertEqual(result["protocol_corrections"], 1)
+        self.assertEqual(result["protocol_correction_rounds"], 1)
+        self.assertEqual(result["locator_non_tool_responses"][0]["content"], "WRONG_LOCATOR_DRAFT")
+        self.assertEqual(result["controller_fallback_calls"], 0)
+        self.assertEqual(audit.requests["locator"], 3)
+        self.assertEqual(audit.requests["reasoner"], 1)
+        self.assertEqual(audit.costs()["http_requests"], 4)
+        self.assertEqual(requests[0][1]["tool_choice"], "required")
+        events=[json.loads(line) for line in audit.path.read_text().splitlines()]
+        correction=next(e for e in events if e["event"]=="protocol_correction")
+        self.assertEqual(correction["source"], "controller")
+        history=next(e for e in reversed(events) if e["event"]=="history_checkpoint")["messages"]
+        validate_history(history)
+
+    def test_plain_answer_never_accepted_when_server_ignores_tool_requirement(self):
+        result, audit = self.run_agent(lambda req: httpx.Response(200, json=reply(
+            {"role":"assistant","content":"red"})))
+        self.assertEqual(result["execution_status"], "incomplete")
+        self.assertEqual(result["stop_reason"], "premature_final")
+        self.assertIsNone(result["raw_answer"])
+        self.assertEqual(result["protocol_corrections"], 2)
+        self.assertEqual(result["protocol_correction_rounds"], 2)
+        self.assertEqual(audit.requests["locator"], 3)
+        self.assertEqual(audit.requests["reasoner"], 0)
+
+    def test_protocol_correction_respects_last_round_budget(self):
+        self.config["max_rounds"] = 1
+        result, audit = self.run_agent(lambda req: httpx.Response(200, json=reply(
+            {"role":"assistant","content":"red"})))
+        self.assertEqual(result["stop_reason"], "premature_final")
+        self.assertEqual(result["protocol_corrections"], 0)
+        self.assertEqual(audit.requests["locator"], 1)
+
+    def test_protocol_correction_can_be_disabled_for_comparison(self):
+        self.config["max_protocol_corrections"] = 0
+        self.config["locator_tool_choice"] = "auto"
+        seen = []
+        def handler(req):
+            seen.append(json.loads(req.content))
+            return httpx.Response(200, json=reply({"role":"assistant","content":"red"}))
+        result, audit = self.run_agent(handler)
+        self.assertEqual(seen[0]["tool_choice"], "auto")
+        self.assertEqual(result["protocol_corrections"], 0)
+        self.assertIsNone(result["raw_answer"])
+        self.assertEqual(audit.requests["locator"], 1)
+
+    def test_correction_without_read_pages_requires_evidence_first(self):
+        requests = []
+        def handler(req):
+            body=json.loads(req.content);role=role_of(body);requests.append((role,body))
+            if role=="locator":
+                turn=sum(r=="locator" for r,b in requests)
+                if turn==1:
+                    return httpx.Response(200,json=reply({"role":"assistant","content":"I know the answer"}))
+                if turn==2:
+                    self.assertEqual(body["tool_choice"],"required")
+                    return httpx.Response(200,json=reply(tool("read_page",{"pages":[0]},"read"),"tool_calls"))
+                return httpx.Response(200,json=reply(tool("call_reasoner",{"pages":[0]},"reason"),"tool_calls"))
+            return httpx.Response(200,json=reply({"role":"assistant","content":'{"status":"answerable","answer":"red"}'}))
+        result,audit=self.run_agent(handler)
+        self.assertEqual(result["stop_reason"],"reasoner_answerable")
+        self.assertEqual(result["protocol_corrections"],1)
+        self.assertEqual(audit.requests["reasoner"],1)
+
+    def test_correction_configuration_validated(self):
+        for key, value in [("locator_tool_choice","none"),("max_protocol_corrections",-1),
+                           ("max_protocol_corrections",True),("max_protocol_corrections",5)]:
+            config=copy.deepcopy(self.config);config[key]=value
+            with self.assertRaises(ValueError):validate(config)
+
 class Integration(Base):
     def setUp(self):
         super().setUp();self.fixture=Fixture();self.processes=[]

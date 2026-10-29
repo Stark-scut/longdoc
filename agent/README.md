@@ -16,6 +16,22 @@ Locator → search / read_page → call_reasoner(pages=[...]) → Reasoner
 - search 继续在OCR/caption上检索并返回简短摘要；初始大纲仍用于定位。这次精简针对read_page的返回内容。
 - 页面图像与原生assistant/tool历史仍持续保留，当前没有历史压缩。
 
+
+## Locator提前结束的处理（0.2.1）
+
+Locator默认使用tool_choice=required。提示词大纲末尾再次明确其职责为取证和提交证据页。
+若服务仍返回普通文本，该内容保存为locator_non_tool_responses，不直接作为raw_answer。
+
+在原max_rounds和wall_seconds预算内，最多发出max_protocol_corrections次明确的控制器纠正（默认2次）：
+已有已读页时，下一次Locator请求指定call_reasoner工具，页列表仍由Locator选择；
+没有已读页时，先要求继续取证。框架不代选页面，不直接拿Locator答案判分。
+Reasoner请求只包含原问题与选定页的真实证据，不把Locator草稿作为答案提示。
+
+protocol_corrections、protocol_correction_rounds及protocol_correction事件记录纠正过程；
+所有实际请求仍计入成本。controller_fallback_calls=0表示没有框架直接代调Reasoner。
+可在独立配置中设置locator_tool_choice=auto、max_protocol_corrections=0测试无纠正路径。
+这些是语义配置，需新输出目录；旧快照不会自动采用新代码。
+
 ## 代码分工
 
 | 模块 | 职责 |
@@ -42,7 +58,7 @@ python -m agent eval --config configs/agent/native.json \
 # 小样本：每卡一份完整模型
 python -m agent eval --config configs/agent/native.json \
   --gpu-ids 0,1 --concurrency-per-gpu 1 \
-  --indices 53,63,66,464,522 --output-dir output/agent/direct_pages_smoke
+  --indices 53,63,66,464,522 --output-dir output/agent/direct_pages_smoke_v2
 
 # 全量另用新目录
 python -m agent eval --config configs/agent/native.json \
