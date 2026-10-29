@@ -2,7 +2,7 @@
 """Qwen3.5 + vLLM：全部 PDF 页图 → 回答 → 模型抽取短答案 → 官方评分。
 
 基于归档 scripts/evaluate_mmlongbench_direct.py，使用本地部署的 Qwen3.5。
-依赖 requests、tqdm。API key 仅从环境变量读取；本地无认证服务无需 key。
+可选整页前缀截断超长文档。依赖 requests、Pillow、tqdm。API key 仅从环境变量读取；本地无认证服务无需 key。
 先运行 serve_qwen35_mmlongbench.sh；--dry-run 检查数据，--limit 2 做冒烟测试。
 """
 
@@ -28,7 +28,11 @@ from tqdm import tqdm
 WORKDIR = next(p for p in Path(__file__).resolve().parents if (p / ".gitignore").is_file())
 ROOT = WORKDIR / "aaai_commit_20260803" / "aaai_commit"
 EVAL_DIR = ROOT / "MMLongBench-Doc" / "eval"
-spec = importlib.util.spec_from_file_location("mmlb_official_score", EVAL_DIR / "eval_score.py")
+SCORER_PATH = EVAL_DIR / "eval_score.py"
+if not SCORER_PATH.is_file(): SCORER_PATH = WORKDIR / "agent/metrics/mmlongbench.py"
+EXTRACTION_PROMPT_PATH = EVAL_DIR / "prompt_for_answer_extraction.md"
+if not EXTRACTION_PROMPT_PATH.is_file(): EXTRACTION_PROMPT_PATH = WORKDIR / "agent/prompts/extract.txt"
+spec = importlib.util.spec_from_file_location("mmlb_official_score", SCORER_PATH)
 scorer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scorer)
 # 原评分函数会打印 List 的比较过程；仅禁用该模块的打印，避免并发时重定向全局 stdout。
@@ -84,6 +88,55 @@ def page_content(paths):
             {"type": "image_url", "image_url": {"url": "data:image/png;base64," + encoded}},
         ])
     return content
+
+class InputBudgetExceeded(ValueError):
+    pass
+
+
+@lru_cache(maxsize=256)
+def page_visual_tokens(paths):
+    return tuple(native_page_info((path,))[0] for path in paths)
+
+
+def prefix_pages(paths, question, context_limit, output_tokens, input_limit):
+    """Keep a whole-page prefix, reserving output plus conservative text/template room."""
+    budget = min(input_limit, context_limit - output_tokens)
+    # UTF-8 byte count conservatively covers question/instruction text tokens;
+    # page labels/vision delimiters have their own allowance.
+    text_reserve = len((INSTRUCTION + "\nQuestion: " + question).encode("utf-8")) + 512
+    used = text_reserve
+    count = 0
+    costs = page_visual_tokens(paths)
+    for cost in costs:
+        if used + cost + 16 > budget:
+            break
+        used += cost + 16
+        count += 1
+    if count == 0:
+        raise ValueError("Input budget cannot fit the question and one complete page image")
+    selected = paths[:count]
+    metadata = {
+        "policy": "whole-page-prefix-v1", "applied": count < len(paths),
+        "original_pages": len(paths), "kept_pages": count, "dropped_pages": len(paths) - count,
+        "kept_page_indices": list(range(count)), "input_token_limit": budget,
+        "requested_input_token_limit": input_limit, "context_limit": context_limit,
+        "output_token_budget": output_tokens, "estimated_visual_tokens": sum(costs[:count]),
+        "estimated_prompt_tokens_with_reserve": used, "text_template_token_reserve": text_reserve,
+        "context_retries": 0,
+        "note": "Image token counts are estimated at native 32-pixel alignment; text/template room is reserved. Whole images are never cut.",
+    }
+    return selected, metadata
+
+
+def context_overflow(error):
+    text = str(error).lower()
+    return "http 400" in text and any(term in text for term in (
+        "maximum context", "context length", "max_model_len", "longer than the maximum"))
+
+
+def generation_messages(paths, question):
+    return [{"role": "user", "content": page_content(paths) +
+             [{"type": "text", "text": "Question: " + question}]}]
 
 
 def chat(session, base_url, model, key, messages, max_tokens, timeout, thinking,
@@ -157,6 +210,7 @@ def report(records, output):
         "accuracy_with_incomplete_as_zero": acc, "f1_with_incomplete_as_zero": f1,
         "accuracy_percent": 100 * acc, "f1_percent": 100 * f1,
         "evaluation_complete": complete == len(records),
+        "truncated_inputs": sum(bool(s.get("input_truncation", {}).get("applied")) for s in records),
         "truncated_answers": sum(s.get("generation", {}).get("finish_reason") == "length"
                                  for s in records),
     }
@@ -177,7 +231,7 @@ def report(records, output):
         print("这是未完成的评测：失败和未完成题目按 0 分计入；重跑相同命令可以继续。")
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=ROOT / "data/mmlongbench/samples.json")
     parser.add_argument("--images-dir", type=Path, default=ROOT / "data/mmlongbench/images_1024")
@@ -201,11 +255,14 @@ def main():
     parser.add_argument("--native-resolution", action="store_true",
                         help="检查 max-pixels 足以保留源页图分辨率，只允许模型要求的 32 像素对齐。")
     parser.add_argument("--max-model-len", type=int,
-                        help="与服务一致；原分辨率模式预检查明显超出上下文的文档，不缩图或截页。")
+                        help="与服务一致；原分辨率模式预检查上下文，是否截页由truncate-long-documents控制。")
+    parser.add_argument("--truncate-long-documents", action=argparse.BooleanOptionalAction, default=False,
+                        help="按整页边界保留文档前部，不缩图；记录截断信息")
+    parser.add_argument("--input-token-limit", type=int, default=260000)
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=False,
                         help="与归档脚本一致，回答默认关闭思考；--enable-thinking 可开启。抽取固定关闭思考。")
     parser.add_argument("--dry-run", action="store_true", help="仅检查题目和所有页图，不调用 API、不写结果。")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.output is None:
         filename = "qwen35_direct.json" if args.enable_thinking else "qwen35_direct_no_thinking.json"
         if args.native_resolution:
@@ -221,6 +278,10 @@ def main():
         parser.error("num-shards 必须为正，且 0 <= shard-index < num-shards。")
     if args.max_model_len is not None and args.max_model_len <= args.max_tokens:
         parser.error("max-model-len 必须大于 max-tokens。")
+    if args.truncate_long_documents and (not args.native_resolution or args.max_model_len is None):
+        parser.error("前缀截断需要--native-resolution和--max-model-len")
+    if args.input_token_limit <= 0:
+        parser.error("input-token-limit必须为正")
     args.extractor_base_url = args.extractor_base_url or args.base_url
     args.extractor_model = args.extractor_model or args.model
     input_bytes = args.input.read_bytes()
@@ -238,11 +299,12 @@ def main():
         documents = {s["doc_id"] for s in selected}
         counts = [len(page_paths(args.images_dir, doc)) for doc in documents]
         print(f"数据检查：{len(selected)} 题 / {len(documents)} 份文档 / {sum(counts)} 张页图；"
-              f"最长 {max(counts)} 页。全部页面均发送，不截页。")
+              f"最长 {max(counts)} 页。前缀截断={args.truncate_long_documents}。")
         print(f"页图目录：{args.images_dir.resolve()}")
         print(f"回答服务：{args.model} @ {args.base_url}；thinking={args.enable_thinking}；"
               f"每页 max_pixels={args.max_pixels}。服务端需允许至少 {max(counts)} 张图片。")
-        print("不裁页、不检索、不发送 GT 或证据页标签；上下文超限会记录为失败。")
+        print("不检索、不发送GT或证据页标签；" +
+              ("超长文档仅保留可容纳的整页前缀。" if args.truncate_long_documents else "保留全部页，超限记失败。"))
         if args.num_shards > 1:
             print(f"分片 {args.shard_index}/{args.num_shards}：{len(selected)} 题，保留原始题号。")
         if args.native_resolution:
@@ -255,12 +317,12 @@ def main():
             print(f"原分辨率检查通过：最大对齐面积 {largest} 像素；仅做 32 像素对齐。")
             if oversized:
                 print(f"明确超出上下文：{len(oversized)} 份文档 / "
-                      f"{sum(s['doc_id'] in oversized for s in selected)} 题；"
-                      "已有回答可复用，未保存回答的超限题记录失败并计零。")
+                      f"{sum(s['doc_id'] in oversized for s in selected)} 题；" +
+                      ("将保留整页前缀并记录截断。" if args.truncate_long_documents else "保留全部页，超限记失败。"))
     if args.dry_run:
         return 0
 
-    prompt = (EVAL_DIR / "prompt_for_answer_extraction.md").read_text(encoding="utf-8")
+    prompt = EXTRACTION_PROMPT_PATH.read_text(encoding="utf-8")
     generation_config = {"base_url": args.base_url.rstrip("/"), "model": args.model,
                          "images_dir": str(args.images_dir.resolve()), "max_tokens": args.max_tokens,
                          "enable_thinking": args.enable_thinking, "instruction": INSTRUCTION,
@@ -268,6 +330,10 @@ def main():
     if args.native_resolution:
         generation_config.update(min_pixels=1024, native_resolution=True,
                                  spatial_factor=32, max_model_len=args.max_model_len)
+    if args.truncate_long_documents:
+        generation_config["input_truncation"] = {
+            "policy": "whole-page-prefix-v1", "input_token_limit": args.input_token_limit,
+            "context_limit": args.max_model_len, "output_token_budget": args.max_tokens}
     extraction_config = {"base_url": args.extractor_base_url.rstrip("/"), "model": args.extractor_model,
                          "max_tokens": args.extract_max_tokens, "enable_thinking": False,
                          "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()}
@@ -287,10 +353,9 @@ def main():
             parser.error("分片设置与已有结果不同，请换一个 output 路径。")
         old_generation = old_meta["generation"]
         if args.stage != "score":
-            # 上下文上限只是完整请求的容量检查，不截页、不截断输入或改变输出预算。
-            # 允许容量变化后复用完整答案；其余生成配置仍须一致。
-            old_comparable = {k: v for k, v in old_generation.items() if k != "max_model_len"}
-            new_comparable = {k: v for k, v in generation_config.items() if k != "max_model_len"}
+            # 不截断时允许容量变化后复用完整答案；截断时容量会改变输入，须一致。
+            old_comparable = {k: v for k, v in old_generation.items() if k != "max_model_len" or args.truncate_long_documents}
+            new_comparable = {k: v for k, v in generation_config.items() if k != "max_model_len" or args.truncate_long_documents}
             if old_comparable != new_comparable:
                 parser.error("生成配置与已有结果不同，请换一个 output 路径。")
         if args.stage != "predict" and old_meta["extraction"] not in (None, extraction_config):
@@ -349,24 +414,51 @@ def main():
             sample.pop("error", None)
             sample.pop("score", None)
             if not sample.get("response"):
-                paths = page_paths(args.images_dir, sample["doc_id"])
+                all_paths = page_paths(args.images_dir, sample["doc_id"])
+                paths = all_paths
+                truncation = None
+                if args.truncate_long_documents:
+                    paths, truncation = prefix_pages(all_paths, sample["question"], args.max_model_len,
+                                                      args.max_tokens, args.input_token_limit)
+                    sample["input_truncation"] = truncation
                 if args.native_resolution:
                     tokens, _ = native_page_info(paths)
-                    sample.update(page_count=len(paths), estimated_visual_tokens=tokens)
-                    if args.max_model_len and tokens + args.max_tokens >= args.max_model_len:
-                        raise ValueError(
-                            f"原分辨率上下文超限：仅视觉约 {tokens} tokens + "
-                            f"输出预算 {args.max_tokens} >= {args.max_model_len}；保留全部页面，不缩图。")
-                # 发送内容只含页图、页序号、用户问题；不使用 GT 和 gold evidence_pages。
-                content = page_content(paths) + [{"type": "text", "text": "Question: " + sample["question"]}]
-                text, info = chat(session, args.base_url, args.model, key,
-                                  [{"role": "user", "content": content}],
-                                  args.max_tokens, args.timeout, args.enable_thinking,
-                                  temperature=args.temperature, max_pixels=args.max_pixels,
-                                  min_pixels=1024 if args.native_resolution else 65536)
+                    sample.update(page_count=len(paths), original_page_count=len(all_paths),
+                                  estimated_visual_tokens=tokens)
+                    if not args.truncate_long_documents and args.max_model_len and tokens + args.max_tokens >= args.max_model_len:
+                        raise ValueError(f"原分辨率上下文超限：视觉约{tokens}+输出{args.max_tokens} >= {args.max_model_len}")
+                while True:
+                    try:
+                        text, info = chat(session, args.base_url, args.model, key,
+                                          generation_messages(paths, sample["question"]),
+                                          args.max_tokens, args.timeout, args.enable_thinking,
+                                          temperature=args.temperature, max_pixels=args.max_pixels,
+                                          min_pixels=1024 if args.native_resolution else 65536)
+                        actual = (info.get("usage") or {}).get("prompt_tokens")
+                        if truncation and isinstance(actual, int) and actual > truncation["input_token_limit"]:
+                            truncation.setdefault("discarded_generations", []).append({
+                                "usage": info.get("usage"), "elapsed_seconds": info.get("elapsed_seconds")})
+                            raise InputBudgetExceeded(f"Actual prompt {actual} exceeds input budget {truncation['input_token_limit']}")
+                        break
+                    except ValueError as exc:
+                        if (not truncation or not (context_overflow(exc) or isinstance(exc, InputBudgetExceeded)) or len(paths) <= 1 or
+                            truncation["context_retries"] >= 8):
+                            raise
+                        paths = paths[:-1]
+                        truncation.update(applied=True, kept_pages=len(paths),
+                                          dropped_pages=len(all_paths)-len(paths),
+                                          kept_page_indices=list(range(len(paths))),
+                                          estimated_visual_tokens=native_page_info(paths)[0],
+                                          estimated_prompt_tokens_with_reserve=(native_page_info(paths)[0] + 16*len(paths) + truncation["text_template_token_reserve"]),
+                                          context_retries=truncation["context_retries"]+1)
+                        truncation.setdefault("context_errors", []).append(str(exc)[:1000])
+                if truncation:
+                    truncation["actual_prompt_tokens"] = (info.get("usage") or {}).get("prompt_tokens")
                 if args.native_resolution:
                     info["context_limit"] = args.max_model_len
                 sample.update(response=text, generation=info, page_count=len(paths), status="predicted")
+                if args.native_resolution:
+                    sample["estimated_visual_tokens"] = native_page_info(paths)[0]
                 commit()  # 抽取失败时保留已生成的回答。
             if args.stage == "predict" or stopping.is_set():
                 sample["status"] = "predicted"

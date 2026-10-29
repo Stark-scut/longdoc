@@ -35,7 +35,7 @@ python -m agent eval --config configs/agent/native.json \
 | --- | --- |
 | [agent/](agent/README.md) | 独立 Native Agent：定位、工具图片、证据、回答、评测、部署和续跑 |
 | [configs/agent/native.json](configs/agent/native.json) | 新 Agent 实验配置；路径和角色可用 CLI 覆盖 |
-| [evaluations/direct_qa/](evaluations/direct_qa/README.md) | 一次输入整篇文档页图的直接问答评测 |
+| [evaluations/direct_qa/](evaluations/direct_qa/README.md) | 直接问答：任意卡数 BF16 独立副本、并发、前缀截断与续跑 |
 | [evaluations/answer_extraction/](evaluations/answer_extraction/README.md) | 对已有答案使用 DeepSeek 重提取、重新判分 |
 | [examples/](examples/README.md) | 最简 read_page Agent、工具图片、缓存探测 |
 | [training/grpo/](training/grpo/README.md) | LoRA GRPO 环境冒烟测试和奖励函数 |
@@ -72,7 +72,7 @@ python -m agent eval --config configs/agent/native.json \
 ```
 
 新 Agent 的评分脚本和提示词自带，**不需要旧归档中的 Agent 或评分代码**。
-旧直接问答/旧 Agent 入口仍保留其原有外部文件要求，见各目录说明。
+直接问答推荐使用 `evaluations/direct_qa/run_replicas.py`，也自带评分与抽取提示词回退；旧 Agent 入口保留其原有外部文件要求。
 
 固定小样本已移到 `data/baselines/citeagent_v2`；旧 Agent 输出已移到 `output/legacy/citeagent_v2`。
 本机旧路径 `citeagent_v2/baseline`、`citeagent_v2/runs` 通过兼容链接访问；后者不提交 Git。
@@ -85,6 +85,7 @@ API 密钥通过环境变量设置，不写到配置：`CITEAGENT_LOCATOR_API_KE
 ```bash
 python tests/test_agent.py
 python tests/test_answer_extraction.py
+python tests/test_direct_replicas.py
 
 # 原实现的兼容性检查，需要本机旧基线和旧评测资源
 python citeagent_v2/full_eval/tests.py

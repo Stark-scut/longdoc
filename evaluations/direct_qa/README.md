@@ -1,13 +1,84 @@
 # Qwen3.5-9B：MMLongBench-Doc 全文页图直接评测
 
-找到的旧脚本：`aaai_commit_20260803/aaai_commit/scripts/evaluate_mmlongbench_direct.py`。
-新入口 `evaluate_qwen35_mmlongbench.py` 基于该流程适配当前本地 Qwen3.5 + vLLM；
-默认数据、抽取提示词及评分函数均来自该归档，不改动归档文件。
+推荐入口是 `run_replicas.py`：任意数量 GPU，每卡一个完整 BF16 / TP=1 模型，默认无 CPU 权重 offload。
+这里运行直接问答，不运行 Agent：文档页图在前、原始问题在后，生成回答、抽取短答案，再与 GT 计算官方 ACC / F1。
+模型请求不包含 GT、gold evidence 或 OCR。
 
-每道题：按数字页号读取对应 PDF 的**全部** `page_0.png ... page_N.png`，
-在同一个 user 请求里发送全部页图和问题，获得自由回答；再请求模型提取短答案，
-最后调用归档 `eval_score.py` 对照 GT 评分。
-回答和抽取请求都不包含 GT、gold evidence、OCR、检索结果或工具调用。
+## 四张 A6000，每张卡并发 8
+
+在已配置好 vLLM / PyTorch / Transformers 的环境中，从仓库根目录运行。
+客户端额外依赖可用 `python -m pip install -r evaluations/direct_qa/requirements.txt` 安装。
+模型、`samples.json` 和 `images_1024` 需在另一台服务器单独准备；它们不在 Git 仓库内。
+如果数据仍在仓库原相对位置，可省略 `--input` 和 `--images-dir`。
+
+```bash
+python evaluations/direct_qa/run_replicas.py \
+  --gpu-ids 0,1,2,3 \
+  --model-path /path/to/Qwen3.5-9B \
+  --input /path/to/mmlongbench/samples.json \
+  --images-dir /path/to/mmlongbench/images_1024 \
+  --max-model-len 262144 \
+  --truncate-long-documents --input-token-limit 260000 \
+  --concurrency 8 --max-num-seqs 8 \
+  --max-num-batched-tokens 4096 \
+  --enable-prefix-caching --mm-processor-cache-gb 1 \
+  --cpu-offload-gb 0 \
+  --output-dir output/mmlongbench/qwen35_a6000_4gpu
+```
+
+- 四卡端口默认 8047、8048、8049、8050。支持非连续卡号，例如 `--gpu-ids 1,4,5`；端口可用 `--ports` 逐一指定。
+- `--concurrency` 是**每卡**客户端并发，四卡设置 8 时最多同时处理 32 题；`--max-num-seqs` 是每卡 vLLM 调度上限。
+- 使用原生上下文 262144，不自动启用 YaRN；不指定 `--max-model-len` 时读取本地模型配置。
+- 回答与短答案抽取均关闭 thinking。默认输出预算分别为 8192 / 2048 token。
+- 默认完整 BF16 权重驻留每张 GPU，不量化。KV 容量和实际并发仍受显存限制，8 路满长上下文不保证能同时运行。
+- Prefix caching 默认开启，并为 Qwen3.5 设置 `--mamba-cache-mode align`。MM processor cache 默认 1 GiB/进程，在 CPU 内存中，与 GPU KV cache 不同。
+- `images_1024` 保持源分辨率，仅做模型需要的 32 像素对齐，不自动缩图。默认 eager；`--no-enforce-eager` 可另测 CUDA Graphs。
+- 短答案默认由同一副本提取；可显式设置 `--extractor-base-url` / `--extractor-model`。抽取器变化需要新目录。
+- 新服务器不需要复制旧评测源码：评分函数与抽取提示词优先读取归档，归档不存在时读取仓库自带的 `agent/metrics/mmlongbench.py` 和 `agent/prompts/extract.txt`。这些文件不启动 Agent。
+
+## 超长文档：只保留前部整页
+
+新入口默认开启 `--truncate-long-documents`，输入目标上限为 260000 token。
+上下文包含输入和输出，因此默认 8192 输出预算下，有效输入预算是 `min(260000, 262144 - 8192) = 253952`。
+进一步为问题、模板、页号和图像标记预留空间，再按视觉 token 估算保留可容纳的连续前部页面。
+正常文档仍输入全部页面；超长文档从末尾整页丢弃，不切碎图片、不缩图。截断后证据可能缺失，此结果属于前缀截断评测，不能标为全部页面评测。
+
+初始预算按图像对齐尺寸估算；后端仍报上下文超限时逐次删除最后一页重试，最多 8 次。
+若成功请求返回的 `usage.prompt_tokens` 超过有效输入预算，也会丢弃该次输出、记录其用量后缩短输入重试。
+记录中的 `actual_prompt_tokens` 来自服务端；服务未报告用量时只保留估算值。
+
+逐题 `input_truncation` 记录策略、原页数、保留页数、丢弃页数、保留的 0 起始页号、估算/实际 token 和重试信息。
+`merged.summary.json` 的 `truncated_inputs` 统计截断题数。
+需要严格保留所有页、超限记失败的旧行为时，使用 `--no-truncate-long-documents`。
+改变截断开关、输入预算或截断模式下的上下文长度，必须使用新输出目录，避免混用不同输入的答案。
+
+## 进度、日志与中断续跑
+
+上述命令加 `--dry-run` 可先检查数据及完整启动计划，不启动服务、不写结果。
+加 `--limit 4` 可先测试四题；随后移除 limit、沿用同一目录完成全量。
+主进度条显示成功/失败、每卡已处理数量、题/小时与 ETA；ETA 会随文档长度波动。
+相同命令可中断续跑：完整题目跳过，已生成回答但抽取失败的题目只重试抽取；Ctrl+C 清理本入口启动的服务进程组。
+保持副本数和端口一致；改变副本数需新目录。并发和缓存容量可在停止入口后调整。
+
+输出统一放在 `--output-dir`：
+
+- `shardN.json`：逐题原回答、抽取答案、官方分数、用量、状态及截断记录。
+- `serverN/server.log`、`serverN/command.txt`、`serverN.launcher.log`：每副本服务日志和实际命令。
+- `evalN.log`：各评测进程日志。
+- `run_config.json`、`run_history.jsonl`：配置与续跑历史；`progress.json`：进度快照。
+- `merged.json`、`merged.summary.json`、`merged.txt`：合并答案、ACC/F1 与分层报告；失败和未完成计零。
+
+```bash
+# 另一个终端只读查看进度
+python evaluations/direct_qa/run_replicas.py --watch \
+  --output-dir output/mmlongbench/qwen35_a6000_4gpu
+
+# 停止任务后，重新合并已保存的结果
+python evaluations/direct_qa/run_replicas.py --merge-only \
+  --output-dir output/mmlongbench/qwen35_a6000_4gpu
+```
+
+以下保留旧入口说明。`run_qwen35_mmlongbench_2gpu.py` 是兼容入口，默认仍使用旧的 131072 上下文、每卡并发 1、无截断、Prefix/MM cache 关闭；新实验请使用上述入口。
 
 ## 使用现有 1024 页图分辨率、两卡各一个模型
 

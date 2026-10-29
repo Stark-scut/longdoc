@@ -3,18 +3,15 @@ set -euo pipefail
 
 # MMLongBench 全文页图直接问答：默认 GPU 1,2，TP=2；也支持单卡 TP=1。
 # 示例：GPU_IDS=4,6 bash serve_qwen35_mmlongbench.sh
-if [[ "${CONDA_DEFAULT_ENV:-}" != qwen35 ]]; then
-    echo "ERROR: 请先 conda activate qwen35" >&2
-    exit 1
-fi
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python)}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 MODEL="${MODEL_PATH:-/media/data1/leizh/models/Qwen3.5-9B}"
 export CUDA_VISIBLE_DEVICES="${GPU_IDS:-1,2}"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export PATH="$CONDA_PREFIX/bin:$PATH"
+if [[ -n "${CONDA_PREFIX:-}" ]]; then export PATH="$CONDA_PREFIX/bin:$PATH"; fi
 export LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LIBRARY_PATH:-}"
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [[ -n "${CONDA_PREFIX:-}" ]]; then export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export PYTHONUNBUFFERED=1
 unset NPROC_PER_NODE NNODES NODE_RANK RANK LOCAL_RANK WORLD_SIZE LOCAL_WORLD_SIZE
@@ -37,7 +34,7 @@ if [[ "${PROFILE_IMAGE_EDGE:-0}" != 0 ]]; then
 fi
 # 归档最长 468 页；约 128K 上下文、每页最多约 256 个视觉 token。
 # 实际文本/视觉 token 超限时仍可能失败，不会自动删除页面。
-CMD=("$CONDA_PREFIX/bin/vllm" serve "$MODEL"
+CMD=("$PYTHON_BIN" -m vllm.entrypoints.openai.api_server --model "$MODEL"
     --served-model-name qwen35-mmlongbench
     --host 127.0.0.1
     --port "${PORT:-8037}"
@@ -96,7 +93,7 @@ echo "本地编译缓存：$LOCAL_CACHE_ROOT"
 printf '%q ' "${CMD[@]}" > "$LOGDIR/command.txt"
 printf '\n' >> "$LOGDIR/command.txt"
 
-"$CONDA_PREFIX/bin/python" - "${PORT:-8037}" "$GPU_MEMORY_UTILIZATION" "$TP" <<'PY'
+"$PYTHON_BIN" - "${PORT:-8037}" "$GPU_MEMORY_UTILIZATION" "$TP" <<'PY'
 import os
 import socket
 import sys
