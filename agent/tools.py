@@ -1,4 +1,5 @@
-"""Page-image-only reads and direct Locator-to-Reasoner evidence selection."""
+"""Text search, image-only reads, explicit stores and memory-based reasoning."""
+from collections import Counter
 import json
 from .client import Failure
 from .reasoner import reason
@@ -14,10 +15,13 @@ def schemas(max_pages):
                  {"query": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1}}, ["query"]),
         function("read_page", "Read whole page images with page indices only. No OCR text, titles or crops are returned.",
                  {"pages": {**pages, "maxItems": max_pages}}, ["pages"]),
-        function("call_reasoner",
-                 "Answer using exactly the pages you specify. Each page must have been successfully read. "
-                 "Reasoner receives their full images, OCR and crops. This list replaces previous evidence.",
+        function("store", "Add relevant, successfully read pages to evidence memory. "
+                 "Pages accumulate across calls; duplicates are ignored. Stored pages cannot be removed or replaced.",
                  {"pages": pages}, ["pages"]),
+        function("call_reasoner",
+                 "Reason over ALL pages in evidence memory, with their full images, OCR and crops. "
+                 "Call store first. Takes no arguments and does not change memory.",
+                 {}, []),
     ]
 
 class Tools:
@@ -25,10 +29,12 @@ class Tools:
         self.question, self.evidence, self.client, self.audit, self.config = question, evidence, client, audit, config
         self.last_reason = None
         self.count = 0
+        self.counts = Counter()
 
-    def execute(self, call):
+    def execute(self, call, *, observed_read_pages=None):
         self.count += 1
         name = call["function"]["name"]
+        self.counts[name] += 1
         try:
             try:
                 args = json.loads(call["function"].get("arguments") or "{}")
@@ -54,10 +60,19 @@ class Tools:
                 parts = self.evidence.document.render_locator(pages)
                 self.evidence.read_pages.update(pages)
                 result = {"pages": pages}
-            elif name == "call_reasoner":
+            elif name == "store":
                 if set(args) != {"pages"}:
-                    raise Failure("invalid_arguments", "call_reasoner requires exactly one argument: pages", True)
-                self.evidence.select(args["pages"])
+                    raise Failure("invalid_arguments", "store requires exactly pages; memory is append-only", True)
+                pages = args["pages"]
+                if (observed_read_pages is not None and isinstance(pages, list) and
+                    any(type(p) is int and p not in observed_read_pages for p in pages)):
+                    raise Failure("invalid_evidence_pages",
+                                  "Locator must receive read_page observations before storing those pages; "
+                                  "store them on the next turn", True)
+                result = self.evidence.store(pages)
+            elif name == "call_reasoner":
+                if args:
+                    raise Failure("invalid_arguments", "call_reasoner takes no arguments; store pages in memory first", True)
                 result = reason(self.question, self.evidence, self.client)
                 self.last_reason = result
             else:

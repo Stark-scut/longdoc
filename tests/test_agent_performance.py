@@ -182,8 +182,9 @@ class Performance(Base):
             role = role_of(body)
             if role == "locator":
                 turn = sum(m["role"] == "tool" for m in body["messages"])
-                name = "read_page" if turn == 0 else "call_reasoner"
-                return httpx.Response(200, json=reply(tool(name, {"pages": [0]}, f"call{turn}"), "tool_calls"))
+                name, args = [("read_page", {"pages": [0]}), ("store", {"pages": [0]}),
+                              ("call_reasoner", {})][turn]
+                return httpx.Response(200, json=reply(tool(name, args, f"call{turn}"), "tool_calls"))
             if role == "reasoner":
                 return httpx.Response(200, json=reply({"role": "assistant", "content":
                                                      '{"status":"answerable","answer":"red"}'}))

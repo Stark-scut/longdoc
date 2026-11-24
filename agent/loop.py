@@ -3,14 +3,14 @@ import copy
 from pathlib import Path
 import time
 from .client import Failure, completed
-from .evidence import Evidence
+from .evidence import EvidenceMemory
 from .tools import Tools, schemas
 
 PROMPT = (Path(__file__).parent / "prompts/locator.txt").read_text()
 ROUTING_REMINDER = (
     "\n\nEND OF OUTLINE. Protocol: you are the Locator, not the final answerer. "
     "Your next response must call a tool. When the evidence is ready, "
-    "call call_reasoner with the complete list of successfully read evidence pages. "
+    "store the relevant successfully read pages in evidence memory, then call call_reasoner with {}. "
     "Do not output the answer as plain text; only Reasoner can finish this session.")
 
 def validate_history(messages, allow_pending=False):
@@ -46,7 +46,7 @@ class Agent:
         self.document, self.client, self.audit, self.config = document, client, audit, config
 
     def run(self, question):
-        evidence = Evidence(self.document)
+        evidence = EvidenceMemory(self.document)
         tools = Tools(question, evidence, self.client, self.audit, self.config)
         messages = [{"role": "system", "content": PROMPT + "\nDocument outline:\n" + self.document.outline() + ROUTING_REMINDER},
                     {"role": "user", "content": question}]
@@ -80,25 +80,32 @@ class Agent:
                         rounds < self.config["max_rounds"]):
                         corrections += 1
                         read_pages = sorted(evidence.read_pages)
-                        if read_pages:
+                        if evidence.pages:
                             next_choice = {"type": "function", "function": {"name": "call_reasoner"}}
                             instruction = (
                                 "Controller protocol correction: your previous plain-text response is only a "
-                                "Locator draft and is not the final answer. Select the relevant evidence pages "
-                                "from these successfully read pages: " + str(read_pages) + ". "
-                                "Now call call_reasoner(pages=[...]) with that complete page set. "
+                                "Locator draft and is not the final answer. Evidence memory contains pages "
+                                + str(sorted(evidence.pages)) + ". Now call call_reasoner with {}. "
                                 "Reasoner will independently answer from the original page evidence.")
+                        elif read_pages:
+                            next_choice = {"type": "function", "function": {"name": "store"}}
+                            instruction = (
+                                "Controller protocol correction: evidence memory is empty. Select relevant pages "
+                                "from these successfully read pages: " + str(read_pages) + ". "
+                                "Call store(pages=[...]) to add them to memory, then call call_reasoner with {}. "
+                                "A plain-text answer cannot finish this session.")
                         else:
                             next_choice = "required"
                             instruction = (
                                 "Controller protocol correction: no page has been successfully read. "
-                                "Use search/read_page to obtain evidence, then call call_reasoner(pages=[...]). "
+                                "Use search/read_page to obtain evidence, store relevant pages, then call call_reasoner with {}. "
                                 "A plain-text answer cannot finish this session.")
                         correction = {"role": "user", "content": instruction}
                         messages.append(correction)
                         correcting_next = True
                         self.audit.emit("protocol_correction", source="controller",
                                         correction=corrections, read_pages=read_pages,
+                                        memory_pages=sorted(evidence.pages), memory_version=evidence.version,
                                         next_tool_choice=next_choice, message=correction)
                         self.audit.emit("history_checkpoint", source="controller", messages=messages)
                         continue
@@ -106,16 +113,22 @@ class Agent:
                     break
                 fatal = None
                 answered = False
+                batch_failed = False
+                observed_read_pages = frozenset(evidence.read_pages)
                 for call in calls:
-                    if answered or fatal:
+                    if answered or fatal or batch_failed:
                         # Resolve all IDs even when later calls in a parallel batch cannot execute.
                         outcome = {"ok": False, "tool": call["function"]["name"],
-                                   "error": {"code": "session_terminated", "message": "An earlier call ended this batch", "retryable": False}}
+                                   "error": {"code": "dependency_failed" if batch_failed and not fatal else "session_terminated",
+                                             "message": "An earlier call ended or failed this batch",
+                                             "retryable": bool(batch_failed and not fatal)},
+                                   "evidence_pages": sorted(evidence.pages), "evidence_version": evidence.version}
                         observation = {"role": "tool", "tool_call_id": call["id"], "content": str(outcome)}
                         self.audit.emit("tool_result", name=call["function"]["name"],
                                         tool_call_id=call["id"], outcome=outcome, message=observation)
                     else:
-                        observation, outcome = tools.execute(call)
+                        observation, outcome = tools.execute(call, observed_read_pages=observed_read_pages)
+                        batch_failed = not outcome["ok"]
                         if not outcome["ok"] and not outcome["error"]["retryable"]:
                             fatal = outcome["error"]
                         answered = (tools.last_reason or {}).get("status") == "answerable"
@@ -139,7 +152,10 @@ class Agent:
                   "raw_answer": tools.last_reason["answer"] if status == "completed" else None,
                   "last_reasoner_result": tools.last_reason, "rounds": rounds,
                   "evidence_pages": sorted(evidence.pages), "evidence_version": evidence.version,
+                  "evidence_memory": {"pages": sorted(evidence.pages), "version": evidence.version,
+                                      "mode": "append-only"},
                   "read_pages": sorted(evidence.read_pages), "tool_calls": tools.count,
+                  "tool_counts": dict(tools.counts),
                   "controller_fallback_calls": 0,
                   "protocol_corrections": corrections, "protocol_correction_rounds": correction_rounds,
                   "locator_non_tool_responses": locator_drafts,

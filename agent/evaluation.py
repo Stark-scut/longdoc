@@ -82,7 +82,7 @@ def prepare(root, config, cases):
                 identity["metadata"][name] = sha(p)
         identity["weights"] = {p.name: [p.stat().st_size, p.stat().st_mtime_ns] for p in model.glob("*.safetensors")}
     snapshot_files = {str(p.relative_to(snapshot)): sha(p) for p in sorted(snapshot.rglob("*")) if p.is_file()}
-    run = {"schema": 2, "implementation": "standalone-agent", "config": config,
+    run = {"schema": 3, "implementation": "standalone-agent", "config": config,
            "model_identity": identity, "snapshot_files": snapshot_files,
            "total": len(cases), "created_at": stamp()}
     run["fingerprint"] = fingerprint({"config": config, "files": snapshot_files, "model": identity})
@@ -91,7 +91,8 @@ def prepare(root, config, cases):
 
 def verify(root, run, config=None):
     root = Path(root)
-    if run.get("implementation") != "standalone-agent" or run.get("schema") != 2:
+    if (run.get("implementation") != "standalone-agent" or run.get("schema") != 3 or
+        run.get("config", {}).get("pipeline") != "locator-evidence-memory"):
         raise ValueError("Output uses a different Agent protocol; use a new directory or the original code branch")
     if config is not None and config != run["config"]:
         raise ValueError("Configuration differs from saved run; use its config or a new output directory")
@@ -155,6 +156,8 @@ class Interrupted(BaseException):
 def worker(root, replica, slot):
     root = Path(root).resolve()
     run = read(root / "run_config.json"); runtime = read(root / "runtime.json")
+    if run.get("schema") != 3 or run.get("config", {}).get("pipeline") != "locator-evidence-memory":
+        raise ValueError("Worker requires a schema 3 evidence-memory snapshot; use the original code for older runs")
     config = copy.deepcopy(run["config"])
     original_url = config["roles"]["locator"]["url"]
     if runtime.get("map_replicas", runtime["local_servers"]):

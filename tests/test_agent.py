@@ -72,7 +72,8 @@ class Fixture:
                     fixture.requests.append((role, body))
                 if role == "locator":
                     step = sum(m["role"] == "tool" for m in body["messages"])
-                    name, args = [("read_page", {"pages": [0]}), ("call_reasoner", {"pages": [0]})][min(step, 1)]
+                    name, args = [("read_page", {"pages": [0]}), ("store", {"pages": [0]}),
+                                  ("call_reasoner", {})][min(step, 2)]
                     self.send(200, reply(tool(name, args, "call_" + str(step)), "tool_calls"))
                 elif role == "reasoner":
                     self.send(200, reply({"role": "assistant", "content": '{"status":"answerable","answer":"red"}'}))
@@ -137,15 +138,16 @@ class Contracts(Base):
             body = json.loads(request.content); role = role_of(body); requests.append((role, body))
             if role == "locator":
                 count = sum(m["role"] == "tool" for m in body["messages"])
-                name = "read_page" if count == 0 else "call_reasoner"
-                return httpx.Response(200, json=reply(tool(name, {"pages": [0]}, "id" + str(count)), "tool_calls"))
+                name, args = [("read_page", {"pages": [0]}), ("store", {"pages": [0]}),
+                              ("call_reasoner", {})][count]
+                return httpx.Response(200, json=reply(tool(name, args, "id" + str(count)), "tool_calls"))
             self.assertEqual(role, "reasoner")
             return httpx.Response(200, json=reply({"role": "assistant", "content": '{"status":"answerable","answer":"red"}'}))
         result, audit = self.run_agent(handler)
         self.assertEqual(result["raw_answer"], "red")
         self.assertTrue(result["protocol_valid"])
         self.assertNotIn("selector", audit.requests)
-        self.assertEqual(audit.requests["locator"], 2)
+        self.assertEqual(audit.requests["locator"], 3)
         history = [body for role, body in requests if role == "locator"][-1]["messages"]
         validate_history(history)
         observation = next(m for m in history if m["role"] == "tool")
@@ -177,8 +179,9 @@ class Contracts(Base):
             body = json.loads(req.content)
             if role_of(body) == "locator":
                 count = sum(m["role"] == "tool" for m in body["messages"])
-                return httpx.Response(200, json=reply(tool("read_page" if count == 0 else "call_reasoner",
-                    {"pages": [0]}, "id" + str(count)), "tool_calls"))
+                name, args = [("read_page", {"pages": [0]}), ("store", {"pages": [0]}),
+                              ("call_reasoner", {})][count]
+                return httpx.Response(200, json=reply(tool(name, args, "id" + str(count)), "tool_calls"))
             return httpx.Response(200, json=reply({"role": "assistant", "content": '{"status":"answerable","answer":["2005","2006"]}'}))
         result, audit = self.run_agent(handler)
         self.assertEqual(result["stop_reason"], "invalid_reasoner_answer")
@@ -269,8 +272,10 @@ class Contracts(Base):
             body = json.loads(req.content)
             if role_of(body) == "locator":
                 count = sum(m["role"] == "tool" for m in body["messages"])
-                message = tool("read_page", {"pages": [0]}, "read") if count == 0 else tool("call_reasoner", {"pages": [0]}, "reason")
-                if count:
+                name, args = [("read_page", {"pages": [0]}), ("store", {"pages": [0]}),
+                              ("call_reasoner", {})][count]
+                message = tool(name, args, "id" + str(count))
+                if count == 2:
                     message["tool_calls"].extend(tool("search", {"query": "extra"}, "skip")["tool_calls"])
                 return httpx.Response(200, json=reply(message, "tool_calls"))
             return httpx.Response(200, json=reply({"role": "assistant", "content": '{"status":"answerable","answer":"red"}'}))
@@ -318,11 +323,11 @@ finally:
 
 
     def test_multiple_page_read_returns_only_indices_and_full_images(self):
-        from agent.evidence import Evidence
+        from agent.evidence import EvidenceMemory
         from agent.tools import Tools
         audit = Audit(self.root / "read/trace.jsonl")
         client = Client(self.config, audit, httpx.MockTransport(lambda req: self.fail("read_page called a model")))
-        evidence = Evidence(self.documents["doc.pdf"])
+        evidence = EvidenceMemory(self.documents["doc.pdf"])
         try:
             message, outcome = Tools("question", evidence, client, audit, self.config).execute(
                 tool("read_page", {"pages": [1, 0]}, "read")["tool_calls"][0])
@@ -341,18 +346,18 @@ finally:
         self.assertEqual(evidence.read_pages, {0, 1})
         self.assertEqual(evidence.pages, set())
 
-    def test_reasoner_rejects_missing_empty_unread_and_invalid_pages(self):
-        from agent.evidence import Evidence
+    def test_store_rejects_missing_empty_unread_and_invalid_pages(self):
+        from agent.evidence import EvidenceMemory
         from agent.tools import Tools
         audit = Audit(self.root / "invalid/trace.jsonl")
         client = Client(self.config, audit, httpx.MockTransport(lambda req: self.fail("Invalid evidence reached model")))
-        evidence = Evidence(self.documents["doc.pdf"])
-        evidence.read_pages.add(0); evidence.select([0])
+        evidence = EvidenceMemory(self.documents["doc.pdf"])
+        evidence.read_pages.add(0); evidence.store([0])
         tools = Tools("question", evidence, client, audit, self.config)
         try:
             for args in ({}, {"pages": []}, {"pages": [1]}, {"pages": [999]}, {"pages": ["0"]},
                          {"pages": [True]}, {"pages": [0], "extra": 1}):
-                message, outcome = tools.execute(tool("call_reasoner", args, "invalid")["tool_calls"][0])
+                message, outcome = tools.execute(tool("store", args, "invalid")["tool_calls"][0])
                 self.assertFalse(outcome["ok"], args)
                 self.assertTrue(outcome["error"]["retryable"])
                 self.assertEqual(evidence.pages, {0})
@@ -361,27 +366,32 @@ finally:
         finally:
             client.close()
 
-    def test_each_reasoner_call_uses_exact_replacement_page_set(self):
+    def test_each_reasoner_call_uses_all_accumulated_memory_pages(self):
         requests = []
         reasoner_calls = []
         def handler(req):
             body = json.loads(req.content); role = role_of(body); requests.append((role, body))
             if role == "locator":
                 step = sum(m["role"] == "tool" for m in body["messages"])
-                name, pages = [("read_page", [0, 1]), ("call_reasoner", [0]), ("call_reasoner", [1])][step]
-                return httpx.Response(200, json=reply(tool(name, {"pages": pages}, "id"+str(step)), "tool_calls"))
+                name, args = [("read_page", {"pages": [0]}), ("store", {"pages": [0]}),
+                              ("call_reasoner", {}), ("read_page", {"pages": [1]}),
+                              ("store", {"pages": [1]}), ("call_reasoner", {})][step]
+                return httpx.Response(200, json=reply(tool(name, args, "id"+str(step)), "tool_calls"))
             self.assertEqual(role, "reasoner"); reasoner_calls.append(body)
             result = {"status":"insufficient","missing":[{"missing_claim":"Need detail page","search_hint":"details"}]} if len(reasoner_calls)==1 else {"status":"answerable","answer":"white"}
             return httpx.Response(200, json=reply({"role":"assistant","content":json.dumps(result)}))
         result, audit = self.run_agent(handler)
         self.assertEqual(result["raw_answer"], "white")
-        self.assertEqual(result["evidence_pages"], [1])
+        self.assertEqual(result["evidence_pages"], [0, 1])
         self.assertEqual(result["read_pages"], [0, 1])
         self.assertEqual(result["evidence_version"], 2)
         self.assertIn("OCR_SENTINEL", json.dumps(reasoner_calls[0]))
-        self.assertNotIn("OCR_SENTINEL", json.dumps(reasoner_calls[1]))
-        self.assertNotIn("page_index=0", json.dumps(reasoner_calls[1]))
-        self.assertEqual(sum(p["type"]=="image_url" for p in reasoner_calls[1]["messages"][1]["content"]), 1)
+        self.assertIn("OCR_SENTINEL", json.dumps(reasoner_calls[1]))
+        self.assertIn("page_index=0", json.dumps(reasoner_calls[1]))
+        self.assertIn("page_index=1", json.dumps(reasoner_calls[1]))
+        self.assertEqual(sum(p["type"]=="image_url" for p in reasoner_calls[1]["messages"][1]["content"]), 3)
+        self.assertEqual(result["evidence_memory"], {"pages": [0, 1], "version": 2, "mode": "append-only"})
+        self.assertEqual(result["tool_counts"], {"read_page": 2, "store": 2, "call_reasoner": 2})
         history = [body for role, body in requests if role=="locator"][-1]["messages"]
         self.assertNotIn("OCR_SENTINEL", json.dumps(history))
         self.assertEqual(sum(p["type"]=="image_url" for m in history if m["role"]=="tool"
@@ -394,8 +404,9 @@ finally:
             body=json.loads(req.content);role=role_of(body);calls.append((role,body))
             if role=="locator":
                 step=sum(m["role"]=="tool" for m in body["messages"])
-                name=["call_reasoner","read_page","call_reasoner"][step]
-                return httpx.Response(200,json=reply(tool(name,{"pages":[0]},"id"+str(step)),"tool_calls"))
+                name,args=[("store",{"pages":[0]}),("read_page",{"pages":[0]}),
+                           ("store",{"pages":[0]}),("call_reasoner",{})][step]
+                return httpx.Response(200,json=reply(tool(name,args,"id"+str(step)),"tool_calls"))
             return httpx.Response(200,json=reply({"role":"assistant","content":'{"status":"answerable","answer":"red"}'}))
         result,audit=self.run_agent(handler)
         self.assertEqual(result["execution_status"],"completed")
@@ -403,12 +414,15 @@ finally:
         second=[body for role,body in calls if role=="locator"][1]
         self.assertIn("invalid_evidence_pages",json.dumps(second))
 
-    def test_schema_has_no_selector_and_requires_explicit_pages(self):
+    def test_schema_has_store_and_argument_free_reasoner(self):
         from agent.tools import schemas
         from agent.config import ROLES
         definitions={s["function"]["name"]:s["function"] for s in schemas(3)}
-        self.assertEqual(set(definitions),{"search","read_page","call_reasoner"})
-        self.assertEqual(definitions["call_reasoner"]["parameters"]["required"],["pages"])
+        self.assertEqual(set(definitions),{"search","read_page","store","call_reasoner"})
+        self.assertEqual(definitions["store"]["parameters"]["required"],["pages"])
+        self.assertEqual(definitions["call_reasoner"]["parameters"]["required"],[])
+        self.assertEqual(definitions["call_reasoner"]["parameters"]["properties"],{})
+        self.assertFalse(definitions["call_reasoner"]["parameters"]["additionalProperties"])
         self.assertNotIn("selector",ROLES)
         self.assertFalse((ROOT/"agent/selector.py").exists())
         self.assertFalse((ROOT/"agent/prompts/selector.txt").exists())
@@ -436,10 +450,12 @@ finally:
                 if turns == 1:
                     return httpx.Response(200, json=reply(tool("read_page", {"pages": [0]}, "read"), "tool_calls"))
                 if turns == 2:
+                    return httpx.Response(200, json=reply(tool("store", {"pages": [0]}, "store"), "tool_calls"))
+                if turns == 3:
                     return httpx.Response(200, json=reply({"role":"assistant","content":"WRONG_LOCATOR_DRAFT"}))
                 self.assertEqual(body["tool_choice"], {"type":"function","function":{"name":"call_reasoner"}})
                 # vLLM named tool calls may legitimately have finish_reason=stop.
-                return httpx.Response(200, json=reply(tool("call_reasoner", {"pages":[0]}, "model_selected_pages"), "stop"))
+                return httpx.Response(200, json=reply(tool("call_reasoner", {}, "reason"), "stop"))
             self.assertEqual(role, "reasoner")
             self.assertNotIn("WRONG_LOCATOR_DRAFT", json.dumps(body))
             self.assertIn("OCR_SENTINEL", json.dumps(body))
@@ -451,9 +467,9 @@ finally:
         self.assertEqual(result["protocol_correction_rounds"], 1)
         self.assertEqual(result["locator_non_tool_responses"][0]["content"], "WRONG_LOCATOR_DRAFT")
         self.assertEqual(result["controller_fallback_calls"], 0)
-        self.assertEqual(audit.requests["locator"], 3)
+        self.assertEqual(audit.requests["locator"], 4)
         self.assertEqual(audit.requests["reasoner"], 1)
-        self.assertEqual(audit.costs()["http_requests"], 4)
+        self.assertEqual(audit.costs()["http_requests"], 5)
         self.assertEqual(requests[0][1]["tool_choice"], "required")
         events=[json.loads(line) for line in audit.path.read_text().splitlines()]
         correction=next(e for e in events if e["event"]=="protocol_correction")
@@ -504,7 +520,9 @@ finally:
                 if turn==2:
                     self.assertEqual(body["tool_choice"],"required")
                     return httpx.Response(200,json=reply(tool("read_page",{"pages":[0]},"read"),"tool_calls"))
-                return httpx.Response(200,json=reply(tool("call_reasoner",{"pages":[0]},"reason"),"tool_calls"))
+                if turn==3:
+                    return httpx.Response(200,json=reply(tool("store",{"pages":[0]},"store"),"tool_calls"))
+                return httpx.Response(200,json=reply(tool("call_reasoner",{},"reason"),"tool_calls"))
             return httpx.Response(200,json=reply({"role":"assistant","content":'{"status":"answerable","answer":"red"}'}))
         result,audit=self.run_agent(handler)
         self.assertEqual(result["stop_reason"],"reasoner_answerable")

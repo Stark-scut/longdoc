@@ -12,8 +12,9 @@
       "thinking": false
     }
   },
-  "schema": 2,
-  "pipeline": "locator-direct-evidence",
+  "schema": 3,
+  "pipeline": "locator-evidence-memory",
+  "evidence_memory_mode": "append-only",
   "locator_read_page_format": "image-only",
   "locator_tool_choice": "required",
   "max_protocol_corrections": 2,

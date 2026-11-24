@@ -5,10 +5,11 @@ from .client import Failure
 PROMPT = (Path(__file__).parent / "prompts/reasoner.txt").read_text()
 
 def reason(question, evidence, client):
-    if not evidence.pages:
-        raise Failure("empty_evidence", "Read and select evidence before calling Reasoner", True)
+    snapshot = evidence.snapshot()
+    if not snapshot.pages:
+        raise Failure("empty_evidence", "Store relevant read pages in evidence memory before calling Reasoner", True)
     parts = [{"type": "text", "text": "Question: " + question}]
-    parts.extend(evidence.render())
+    parts.extend(evidence.render(snapshot))
     result = client.json("reasoner", [{"role": "system", "content": PROMPT},
                                       {"role": "user", "content": parts}])
     status = result.get("status")
@@ -21,4 +22,4 @@ def reason(question, evidence, client):
             raise Failure("invalid_reasoner_missing", "insufficient requires a nonempty missing list")
     else:
         raise Failure("invalid_reasoner_status", str(status))
-    return {**result, "evidence_version": evidence.version, "_input_pages": sorted(evidence.pages)}
+    return {**result, "evidence_version": snapshot.version, "_input_pages": list(snapshot.pages)}

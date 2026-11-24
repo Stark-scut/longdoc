@@ -10,7 +10,7 @@ ROLES = ("locator", "reasoner", "extractor")
 def defaults():
     data = ROOT / "aaai_commit_20260803/aaai_commit/data/mmlongbench"
     return {
-        "schema": 2, "pipeline": "locator-direct-evidence",
+        "schema": 3, "pipeline": "locator-evidence-memory", "evidence_memory_mode": "append-only",
         "locator_read_page_format": "image-only", "data_dir": str(data), "samples": str(data / "samples.json"),
         "blocks": str(data / "stage2_blocks_cache.jsonl"), "images_dir": str(data / "images_1024"),
         "crop_root": str(data / "visual_crops"), "captions": str(data / "crop_captions.jsonl"),
@@ -49,9 +49,10 @@ def load(path=None):
     return validate(config)
 
 def validate(config):
-    if (config["schema"] != 2 or config["pipeline"] != "locator-direct-evidence" or
+    if (config["schema"] != 3 or config["pipeline"] != "locator-evidence-memory" or
+        config["evidence_memory_mode"] != "append-only" or
         config["locator_read_page_format"] != "image-only" or set(config["roles"]) != set(ROLES)):
-        raise ValueError("Use schema 2 with Locator-selected evidence and image-only reads; old runs/configs are separate")
+        raise ValueError("Use schema 3 with append-only evidence memory and image-only reads; old runs/configs are separate")
     for name in ("max_rounds", "read_page_max", "request_attempts", "json_attempts",
                  "max_model_len", "max_pixels", "min_pixels"):
         if type(config[name]) is not int or config[name] < 1:
