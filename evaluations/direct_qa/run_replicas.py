@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -19,6 +20,7 @@ import requests
 from tqdm import tqdm
 
 import evaluate_qwen35_mmlongbench as evaluation
+from partitioning import partition_metadata, shard_assignments
 
 WORKDIR = next(p for p in Path(__file__).resolve().parents if (p / ".gitignore").is_file())
 
@@ -97,6 +99,9 @@ class Progress:
         self.started = time.monotonic()
         self.cache = {}
         self.baseline = None
+        samples = json.loads(args.input.read_bytes())
+        owners = shard_assignments(samples, replica_count(args), args.shard_strategy)
+        self.totals = [owners[:total].count(i) for i in range(replica_count(args))]
         self.bar = tqdm(total=total, desc="MMLongBench", unit="题", dynamic_ncols=True,
                         bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{postfix}]")
 
@@ -104,7 +109,7 @@ class Progress:
         shards = []
         monitor_elapsed = time.monotonic() - self.started
         for shard in range(replica_count(self.args)):
-            total = len(range(shard, self.total, replica_count(self.args)))
+            total = self.totals[shard]
             path = self.args.output_dir / f"shard{shard}.json"
             rows = []
             if path.exists():
@@ -196,6 +201,7 @@ def stop_processes(processes):
 
 
 def merge_results(args, samples, selected):
+    owners = shard_assignments(samples, replica_count(args), args.shard_strategy)
     records = {i: {**sample, "_sample_index": i, "status": "pending"}
                for i, sample in enumerate(selected)}
     input_hash = hashlib.sha256(args.input.read_bytes()).hexdigest()
@@ -206,13 +212,13 @@ def merge_results(args, samples, selected):
             continue
         meta = json.loads(path.with_suffix(".meta.json").read_text())
         if (meta["input_sha256"] != input_hash or
-                meta.get("partition") != ({"num_shards": replica_count(args), "shard_index": shard} if replica_count(args) > 1 else None)):
+                meta.get("partition") != partition_metadata(replica_count(args), shard, args.shard_strategy)):
             raise ValueError(f"分片配置不匹配：{path}")
         shard_metadata.append(meta)
         seen = set()
         for sample in json.loads(path.read_text()):
             index = sample["_sample_index"]
-            if index in seen or index % replica_count(args) != shard or index not in records:
+            if index in seen or index not in records or owners[index] != shard:
                 raise ValueError(f"分片包含重复或越界题号 {index}：{path}")
             if any(sample[key] != samples[index][key] for key in ("doc_id", "question", "answer")):
                 raise ValueError(f"分片题目与输入不匹配：{path} #{index}")
@@ -233,6 +239,16 @@ def merge_results(args, samples, selected):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gpu-ids", default="1,2", help="任意数量不同物理卡，例如0,1,2,3或1,4,5。")
+    parser.add_argument("--shard-strategy", choices=("sample", "document"), default="sample",
+                        help="sample按题号取模；document将同PDF固定到同一GPU，按全量题数平衡。切换策略需新目录。")
+    parser.add_argument("--document-warmup", action=argparse.BooleanOptionalAction, default=True,
+                        help="document模式逐PDF处理，先完成首题再并发其余题以复用前缀。")
+    parser.add_argument("--document-window", type=int, default=1,
+                        help="每卡活跃PDF上限；>1启用滚动调度，1保留旧模式。")
+    parser.add_argument("--warmup-concurrency", type=int, default=2)
+    parser.add_argument("--extraction-concurrency", type=int, default=2)
+    parser.add_argument("--document-token-budget", type=int, default=350000)
+    parser.add_argument("--page-content-cache-mb", type=int, default=512)
     parser.add_argument("--ports", help="每卡一个端口，默认从8047连续分配")
     parser.add_argument("--model-path", type=Path, default=WORKDIR.parent / "models/Qwen3.5-9B")
     parser.add_argument("--input", type=Path, default=evaluation.ROOT / "data/mmlongbench/samples.json")
@@ -262,6 +278,11 @@ def main(argv=None):
                         help="足以保留全部 images_1024 页图；不足时拒绝运行，避免静默缩图。")
     parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--extract-max-tokens", type=int, default=2048)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--extract-temperature", type=float, default=0.0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--batch-invariant", action=argparse.BooleanOptionalAction, default=False,
+                        help="实验性vLLM批次一致性；需验证Qwen3.5多图/align兼容性和速度。")
     parser.add_argument("--extractor-base-url")
     parser.add_argument("--extractor-model")
     parser.add_argument("--limit", type=int, default=0, help="全局前 N 题，再分片；0 全量。")
@@ -282,6 +303,8 @@ def main(argv=None):
             args.model_path = Path(saved["model_path"])
             args.truncate_long_documents = saved.get("truncate_long_documents", False)
             args.input_token_limit = saved.get("input_token_limit", 260000)
+            args.shard_strategy = saved.get("shard_strategy", "sample")
+            args.document_warmup = saved.get("document_warmup", True)
             if not args.limit: args.limit = saved.get("selected_count",0)
             if args.max_model_len is None: args.max_model_len = saved.get("max_model_len")
     gpus = [v.strip() for v in args.gpu_ids.split(",")]
@@ -310,6 +333,9 @@ def main(argv=None):
             or (args.max_cudagraph_capture_size is not None and args.max_cudagraph_capture_size <= 0)
             or not 0 < args.gpu_memory_utilization < 1
             or args.max_model_len <= args.max_tokens or args.max_pixels < 65536
+            or min(args.document_window, args.warmup_concurrency, args.extraction_concurrency) < 1
+            or min(args.document_token_budget, args.page_content_cache_mb, args.seed) < 0
+            or any(not math.isfinite(t) or t < 0 for t in (args.temperature, args.extract_temperature))
             or min(args.timeout, args.ready_timeout, args.progress_interval) <= 0):
         parser.error("检查并发、显存比例、offload、上下文、输出预算、超时和 limit 参数。")
     args.output_dir = args.output_dir.resolve()
@@ -320,6 +346,7 @@ def main(argv=None):
     selected = samples[:args.limit] if args.limit else samples
     if not selected:
         parser.error("输入样本为空。")
+    owners = shard_assignments(samples, len(gpus), args.shard_strategy)
     if args.watch and args.merge_only:
         parser.error("watch 与 merge-only 不能同时使用。")
     if args.watch:
@@ -336,9 +363,10 @@ def main(argv=None):
         return merge_results(args, samples, selected)
     print(f"{len(gpus)}个独立BF16/TP=1副本："+"；".join(f"GPU {g} → :{p}" for g,p in zip(gpus,ports)),flush=True)
     if args.cpu_offload_gb == 0:
-        print(f"共 {len(selected)} 题；按原始题号取模分片；每卡完整模型权重留在 GPU，CPU offload=0。", flush=True)
+        print(f"共 {len(selected)} 题；分片策略={args.shard_strategy}；每卡完整模型权重留在 GPU，CPU offload=0。", flush=True)
     else:
-        print(f"共 {len(selected)} 题；按原始题号取模分片；显式启用每卡 CPU offload={args.cpu_offload_gb} GiB。", flush=True)
+        print(f"共 {len(selected)} 题；分片策略={args.shard_strategy}；显式启用每卡 CPU offload={args.cpu_offload_gb} GiB。", flush=True)
+    print("每卡题数：" + str([owners[:len(selected)].count(i) for i in range(len(gpus))]), flush=True)
     print(f"images={args.images_dir}；thinking=false；结果目录={args.output_dir}", flush=True)
     print(f"max_model_len={args.max_model_len}；超长前缀截断={args.truncate_long_documents}；"
           f"请求输入上限={args.input_token_limit}；有效输入预算={min(args.input_token_limit, args.max_model_len-args.max_tokens)}", flush=True)
@@ -346,6 +374,9 @@ def main(argv=None):
           f"max_num_batched_tokens={args.max_num_batched_tokens}。", flush=True)
     print(f"图像预处理缓存={args.mm_processor_cache_gb} GiB/进程；"
           f"prefix caching={args.enable_prefix_caching}；enforce eager={args.enforce_eager}。", flush=True)
+    print(f"temperature={args.temperature}；提取temperature={args.extract_temperature}；seed={args.seed}；"
+          f"batch invariant={args.batch_invariant}；PDF窗口={args.document_window}；"
+          f"冷请求上限={args.warmup_concurrency}；提取上限={args.extraction_concurrency}。", flush=True)
 
     # 整体检查一次；各工作进程还会检查自己的分片，保证直接调用它们也安全。
     documents = {sample["doc_id"] for sample in selected}
@@ -371,6 +402,7 @@ def main(argv=None):
                    MM_PROCESSOR_CACHE_GB=str(args.mm_processor_cache_gb),
                    ENABLE_PREFIX_CACHING=str(int(args.enable_prefix_caching)),
                    ENFORCE_EAGER=str(int(args.enforce_eager)),
+                   MODEL_SEED=str(args.seed), VLLM_BATCH_INVARIANT=str(int(args.batch_invariant)),
                    MAX_CUDAGRAPH_CAPTURE_SIZE=str(args.max_cudagraph_capture_size or args.max_num_seqs),
                    SERVER_LOGDIR=str(args.output_dir / f"server{shard}"),
                    PYTHONUNBUFFERED="1", PYTHON_BIN=sys.executable)
@@ -381,10 +413,19 @@ def main(argv=None):
                    "--output", str(args.output_dir / f"shard{shard}.json"),
                    "--base-url", f"http://127.0.0.1:{port}/v1", "--model", "qwen35-mmlongbench",
                    "--num-shards", str(len(gpus)), "--shard-index", str(shard),
+                   "--shard-strategy", args.shard_strategy,
+                   "--document-warmup" if args.document_warmup else "--no-document-warmup",
                    "--concurrency", str(args.concurrency), "--native-resolution",
                    "--max-model-len", str(args.max_model_len), "--max-pixels", str(args.max_pixels),
                    "--max-tokens", str(args.max_tokens), "--extract-max-tokens", str(args.extract_max_tokens),
                    "--timeout", str(args.timeout), "--limit", str(args.limit), "--no-enable-thinking"]
+        command += ["--temperature", str(args.temperature), "--extract-temperature", str(args.extract_temperature),
+                    "--seed", str(args.seed), "--batch-invariant" if args.batch_invariant else "--no-batch-invariant",
+                    "--document-window", str(args.document_window),
+                    "--warmup-concurrency", str(args.warmup_concurrency),
+                    "--extraction-concurrency", str(args.extraction_concurrency),
+                    "--document-token-budget", str(args.document_token_budget),
+                    "--page-content-cache-mb", str(args.page_content_cache_mb)]
         if args.truncate_long_documents:
             command += ["--truncate-long-documents", "--input-token-limit", str(args.input_token_limit)]
         if args.extractor_base_url:
@@ -423,6 +464,8 @@ def main(argv=None):
     runtime_keys = {"concurrency", "max_num_seqs", "max_num_batched_tokens", "progress_interval", "watch",
                     "cpu_offload_gb", "max_model_len", "mm_processor_cache_gb", "enable_prefix_caching",
                     "enforce_eager", "max_cudagraph_capture_size", "gpu_ids", "selected_count"}
+    runtime_keys.update({"document_window", "warmup_concurrency", "extraction_concurrency",
+                         "document_token_budget", "page_content_cache_mb"})
     if args.truncate_long_documents:
         runtime_keys.discard("max_model_len")
     if config_path.exists():
@@ -430,6 +473,8 @@ def main(argv=None):
         old_config.setdefault("num_replicas", len(old_config["gpu_ids"].split(",")))
         old_config.setdefault("selected_count",len(selected))
         old_config.setdefault("truncate_long_documents", False)
+        old_config.setdefault("shard_strategy", "sample")
+        old_config.setdefault("document_warmup", True)
         old_config.setdefault("input_token_limit", 260000)
         if ({k: v for k, v in old_config.items() if k not in runtime_keys} !=
                 {k: v for k, v in config.items() if k not in runtime_keys}):
@@ -486,7 +531,7 @@ def main(argv=None):
             session.close()
         workers = []
         for shard, (env, command) in enumerate(plans):
-            if not any(i % len(gpus) == shard for i in range(len(selected))):
+            if shard not in owners[:len(selected)]:
                 continue
             log = (args.output_dir / f"eval{shard}.log").open("a", buffering=1)
             log_files.append(log)

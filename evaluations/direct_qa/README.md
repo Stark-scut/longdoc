@@ -1,5 +1,23 @@
 # Qwen3.5-9B：MMLongBench-Doc 全文页图直接评测
 
+## 当前 A100 环境的 Prefix cache 修复与文档分片
+
+本地 vLLM 0.24.0 的多图 Mamba 对齐停滞已应用兼容补丁，原分片配置已在 A100
+完成前 256 题、零错误。排错步骤、可回退补丁和结果证据见
+[PREFIX_CACHE_FIX.md](PREFIX_CACHE_FIX.md)。
+
+新的测试配置将图片预处理缓存设为 4 GiB，并将相同 PDF 的问题固定到同一 GPU，
+每份 PDF 先完成首题再并发其余题目，避免各卡重复计算同一文档的冷前缀：
+
+```bash
+bash /media/data5/leizh/longdoc/longdoc/evaluations/direct_qa/test_prefix_fix.sh --limit 256 --timeout 300
+```
+
+对应新参数为 `--shard-strategy document --document-warmup --mm-processor-cache-gb 4`。
+GPU、输入、模型、页面设置均由脚本指定；结果写入独立的 `qwen35_a100_doc_prefix_mm4`。
+新配置的实际提速和图片缓存稳定性仍需 GPU 验证，按文档分片不能复用旧按题分片目录。
+下面保留原双卡入口及背景说明。
+
 推荐入口是 `run_replicas.py`：任意数量 GPU，每卡一个完整 BF16 / TP=1 模型，默认无 CPU 权重 offload。
 这里运行直接问答，不运行 Agent：文档页图在前、原始问题在后，生成回答、抽取短答案，再与 GT 计算官方 ACC / F1。
 模型请求不包含 GT、gold evidence 或 OCR。
@@ -356,3 +374,68 @@ F1 按归档的 answerable/unanswerable 定义计算，不是普通 token F1。
 错误和未完成题目按 0 分进入总体分母，避免因跳过失败样本而抬高分数。
 只有 `evaluation_complete=true` 且 `complete=1082` 才表示全量评测完成。
 `truncated_answers` 会单独报告输出达到 token 上限的回答数量。
+
+## 滚动 PDF 调度与复现检查（2026-10-30）
+
+`test_prefix_fix.sh` 现在默认每卡总并发 16、最多 4 份活跃 PDF、最多 2 个冷请求，
+先完成每份 PDF 的首题**主推理**，随即放行后续题目；提取和评分不再阻塞该 PDF。
+主推理与提取共享总并发额度，提取最多占 2 个位置。一份 PDF 的主推理全部结束后
+立即补入新 PDF，不需要等待其他文档或该 PDF 的提取完成。
+主推理失败的首题不会将文档标记为已预热；下一题会重新尝试预热。
+
+原来的全量命令仍可直接使用：
+
+```bash
+bash evaluations/direct_qa/test_prefix_fix.sh \
+  --limit 0 --concurrency 16 --max-num-seqs 16 --timeout 900
+```
+
+默认结果目录改为 `output/mmlongbench/qwen35_a100_doc_prefix_mm4_rolling_seed0`，
+避免复用已经完成的旧实验。分片、提示词、输入分辨率、整页裁剪和评分算法保持原样。
+新增 `temperature=0`、提取 `temperature=0`、`seed=0` 显式请求参数；服务 seed 也固定为 0。
+这些参数与批次一致性开关写入元数据；改变它们需要新输出目录，旧结果不会被删除。
+仅调整窗口、总并发、冷请求数、提取并发和缓存预算可以续跑；测速度则必须使用新目录。
+
+| 参数 | 入口默认值 | 含义 |
+|---|---:|---|
+| `--document-window` | 4 | 活跃 PDF 上限；设为 1 可恢复原逐 PDF 调度 |
+| `--warmup-concurrency` | 2 | 同时进行的首题冷请求上限 |
+| `--extraction-concurrency` | 2 | 提取并发上限，计入总并发 |
+| `--document-token-budget` | 350000 | 活跃文档估计前缀 token 总预算；0 禁用该约束 |
+| `--page-content-cache-mb` | 512 | 每个客户端进程的已编码页图缓存 MiB 预算 |
+| `--temperature` / `--extract-temperature` | 0 / 0 | 主推理、提取的温度 |
+| `--seed` | 0 | 请求与本地服务的固定 seed |
+| `--batch-invariant` | 关闭 | 实验性 vLLM 批次一致性，启用需用新目录 |
+
+token 预算只用于客户端文档准入估计，不是 vLLM GPU KV 预留；一个文档超过预算时
+允许其单独运行。长文档可能使实际活跃 PDF 数小于 4。客户端图片缓存按编码字节数
+和窗口数限制（不等于进程 RSS 上限），相同页集的并发缺失只读图/编码一次；
+超过单项预算的文档仍可推理，但不会驻留缓存。服务端 `mm-processor-cache-gb` 是独立参数。
+直接调用 Python 入口时 `document-window` 仍默认为 1，保留其他调用方的原有行为。
+
+温度 0 和固定 seed **不保证不同批次或缓存状态下逐字一致**。本地 vLLM 有
+`VLLM_BATCH_INVARIANT` 实现，但 Qwen3.5 多图 + Mamba align 补丁组合需单独验证。
+`run_replicas.py --batch-invariant` 会给所有本地服务设置该环境变量，并记录配置。
+独立调用 evaluator 时，这个参数只记录连接服务的设置，需自行正确配置服务；
+指定外部提取服务时，本入口也不能替它开启 batch invariance。
+
+先在两个新目录重复跑同一批问题，随后再改并发做对比；例如：
+
+```bash
+bash evaluations/direct_qa/test_prefix_fix.sh --limit 256 --timeout 900 \
+  --batch-invariant --output-dir output/mmlongbench/repro_a
+bash evaluations/direct_qa/test_prefix_fix.sh --limit 256 --timeout 900 \
+  --batch-invariant --output-dir output/mmlongbench/repro_b
+python evaluations/direct_qa/compare_reproducibility.py \
+  output/mmlongbench/repro_a/merged.json output/mmlongbench/repro_b/merged.json
+```
+
+对比工具按原始题号检查主回答、提取文本、短答案和分数，报告一致率与差异题号；
+有输出差异返回 1，输入题集不匹配或评测未完整完成则报错，不会把缺失结果当成一致。
+单次一致不代表所有形状和输入都确定；还应测试并发 1/16/32 和长短文档。
+上例前 256 题用于快速检查；正式提速对照应另选包含超长文档的相同固定题集。
+先比较 `--document-window 1` 与滚动 4 的总耗时，再单独调整并发 32、
+`--max-num-batched-tokens 8192`，同时观察命中率、抢占、错误数和结果一致率。
+
+本次已完成 CPU 模拟请求、调度和配置验证；当前执行环境不可访问 GPU，尚未实测
+新调度的吞吐收益或批次一致性开关的模型兼容性，不预先声称达到确定性或提速倍数。

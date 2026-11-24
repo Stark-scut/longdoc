@@ -13,6 +13,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -21,6 +22,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
+from partitioning import partition_metadata, shard_assignments
+from document_scheduler import PageContentCache, run_document_pipeline
 
 import requests
 from tqdm import tqdm
@@ -78,8 +81,14 @@ def native_page_info(paths):
     return tokens, largest
 
 
-@lru_cache(maxsize=1)
+_page_content_cache = PageContentCache()
+
+
 def page_content(paths):
+    return _page_content_cache.get(paths, _build_page_content)
+
+
+def _build_page_content(paths):
     content = [{"type": "text", "text": INSTRUCTION}]
     for number, path in enumerate(paths, 1):
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
@@ -140,12 +149,14 @@ def generation_messages(paths, question):
 
 
 def chat(session, base_url, model, key, messages, max_tokens, timeout, thinking,
-         temperature=0.0, max_pixels=None, min_pixels=65536):
+         temperature=0.0, max_pixels=None, min_pixels=65536, seed=None):
     payload = {
         "model": model, "messages": messages, "temperature": temperature,
         "max_tokens": max_tokens, "stream": False,
         "chat_template_kwargs": {"enable_thinking": thinking},
     }
+    if seed is not None:
+        payload["seed"] = seed
     if max_pixels is not None:
         payload["mm_processor_kwargs"] = {"min_pixels": min_pixels, "max_pixels": max_pixels}
     headers = {"Authorization": "Bearer " + key} if key else {}
@@ -246,10 +257,25 @@ def main(argv=None):
     parser.add_argument("--concurrency", type=int, default=1, help="同时处理的题目数；服务端决定实际推理 batch。")
     parser.add_argument("--num-shards", type=int, default=1, help="按原始题号取模分片，配合独立 output 使用。")
     parser.add_argument("--shard-index", type=int, default=0, help="分片编号，从 0 开始。")
+    parser.add_argument("--shard-strategy", choices=("sample", "document"), default="sample")
+    parser.add_argument("--document-warmup", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--document-window", type=int, default=1,
+                        help="每卡活跃PDF上限；1保留逐PDF模式，>1启用滚动推理/提取流水线。")
+    parser.add_argument("--warmup-concurrency", type=int, default=2)
+    parser.add_argument("--extraction-concurrency", type=int, default=2,
+                        help="滚动模式提取上限，仍计入concurrency总额度。")
+    parser.add_argument("--document-token-budget", type=int, default=350000,
+                        help="活跃PDF估计前缀token总预算；0不限制，超预算单文档仍可进入。")
+    parser.add_argument("--page-content-cache-mb", type=int, default=512,
+                        help="客户端已编码页图缓存上限MiB，不是GPU缓存。")
     parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--extract-max-tokens", type=int, default=2048)
     parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--extract-temperature", type=float, default=0.0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--batch-invariant", action=argparse.BooleanOptionalAction, default=False,
+                        help="记录所连接服务的batch invariance设置；独立调用时需自行配置服务。")
     parser.add_argument("--max-pixels", type=int, default=262144,
                         help="每页视觉预处理的最大像素数；默认约 512x512，保留所有页面。")
     parser.add_argument("--native-resolution", action="store_true",
@@ -272,7 +298,11 @@ def main(argv=None):
         args.output = WORKDIR / "output/mmlongbench" / filename
     if (args.limit < 0 or args.concurrency <= 0 or args.max_tokens <= 0
             or args.extract_max_tokens <= 0 or args.timeout <= 0
-            or args.temperature < 0 or args.max_pixels < 65536):
+            or not math.isfinite(args.temperature) or args.temperature < 0
+            or not math.isfinite(args.extract_temperature) or args.extract_temperature < 0
+            or args.seed < 0 or args.max_pixels < 65536
+            or min(args.document_window, args.warmup_concurrency, args.extraction_concurrency) < 1
+            or min(args.document_token_budget, args.page_content_cache_mb) < 0):
         parser.error("limit/temperature 必须非负；并发、token 预算、timeout 必须为正；max-pixels 至少 65536。")
     if args.num_shards < 1 or not 0 <= args.shard_index < args.num_shards:
         parser.error("num-shards 必须为正，且 0 <= shard-index < num-shards。")
@@ -286,8 +316,9 @@ def main(argv=None):
     args.extractor_model = args.extractor_model or args.model
     input_bytes = args.input.read_bytes()
     samples = json.loads(input_bytes)
+    owners = shard_assignments(samples, args.num_shards, args.shard_strategy)
     selected_pairs = [(i, s) for i, s in enumerate(samples[:args.limit] if args.limit else samples)
-                      if i % args.num_shards == args.shard_index]
+                      if owners[i] == args.shard_index]
     selected = [s for _, s in selected_pairs]
     if not selected:
         parser.error("样本为空。")
@@ -322,11 +353,16 @@ def main(argv=None):
     if args.dry_run:
         return 0
 
+    global _page_content_cache
+    _page_content_cache = PageContentCache(args.document_window, args.page_content_cache_mb * 1024**2)
+
     prompt = EXTRACTION_PROMPT_PATH.read_text(encoding="utf-8")
     generation_config = {"base_url": args.base_url.rstrip("/"), "model": args.model,
                          "images_dir": str(args.images_dir.resolve()), "max_tokens": args.max_tokens,
                          "enable_thinking": args.enable_thinking, "instruction": INSTRUCTION,
-                         "temperature": args.temperature, "min_pixels": 65536, "max_pixels": args.max_pixels}
+                         "temperature": args.temperature, "seed": args.seed,
+                         "batch_invariant": args.batch_invariant,
+                         "min_pixels": 65536, "max_pixels": args.max_pixels}
     if args.native_resolution:
         generation_config.update(min_pixels=1024, native_resolution=True,
                                  spatial_factor=32, max_model_len=args.max_model_len)
@@ -336,12 +372,15 @@ def main(argv=None):
             "context_limit": args.max_model_len, "output_token_budget": args.max_tokens}
     extraction_config = {"base_url": args.extractor_base_url.rstrip("/"), "model": args.extractor_model,
                          "max_tokens": args.extract_max_tokens, "enable_thinking": False,
+                         "temperature": args.extract_temperature, "seed": args.seed,
+                         "batch_invariant": args.batch_invariant,
                          "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()}
     metadata_path = args.output.with_suffix(".meta.json")
     metadata = {"input_sha256": hashlib.sha256(input_bytes).hexdigest(),
                 "generation": generation_config, "extraction": None}
-    if args.num_shards > 1:
-        metadata["partition"] = {"num_shards": args.num_shards, "shard_index": args.shard_index}
+    partition = partition_metadata(args.num_shards, args.shard_index, args.shard_strategy)
+    if partition is not None:
+        metadata["partition"] = partition
     previous = {}
     if args.output.exists():
         if not metadata_path.exists():
@@ -389,12 +428,16 @@ def main(argv=None):
             extractor_key = key or os.getenv("QWEN_API_KEY") or os.getenv("API_KEY") or ""
         print(f"短答案抽取模型：{args.extractor_model} @ {args.extractor_base_url}")
     metadata["concurrency"] = args.concurrency
+    metadata["document_warmup"] = args.document_warmup
+    metadata["document_scheduler"] = {name: getattr(args, name) for name in (
+        "document_window", "warmup_concurrency", "extraction_concurrency",
+        "document_token_budget", "page_content_cache_mb")}
     save_json(metadata_path, metadata)
     save_json(args.output, records)
     io_lock = threading.Lock()
     stopping = threading.Event()
 
-    def process(original):
+    def process(original, generation_only=False):
         if stopping.is_set():
             return
         sample = dict(original)
@@ -433,7 +476,8 @@ def main(argv=None):
                                           generation_messages(paths, sample["question"]),
                                           args.max_tokens, args.timeout, args.enable_thinking,
                                           temperature=args.temperature, max_pixels=args.max_pixels,
-                                          min_pixels=1024 if args.native_resolution else 65536)
+                                          min_pixels=1024 if args.native_resolution else 65536,
+                                          seed=args.seed)
                         actual = (info.get("usage") or {}).get("prompt_tokens")
                         if truncation and isinstance(actual, int) and actual > truncation["input_token_limit"]:
                             truncation.setdefault("discarded_generations", []).append({
@@ -460,7 +504,7 @@ def main(argv=None):
                 if args.native_resolution:
                     sample["estimated_visual_tokens"] = native_page_info(paths)[0]
                 commit()  # 抽取失败时保留已生成的回答。
-            if args.stage == "predict" or stopping.is_set():
+            if args.stage == "predict" or generation_only or stopping.is_set():
                 sample["status"] = "predicted"
                 return
             extracted, info = chat(
@@ -469,6 +513,7 @@ def main(argv=None):
                  {"role": "assistant", "content": "\n\nQuestion:{}\nAnalysis:{}\n".format(
                      sample["question"], sample["response"])}],
                 args.extract_max_tokens, args.timeout, False,
+                temperature=args.extract_temperature, seed=args.seed,
             )
             sample.update(extracted_res=extracted, extraction=info)
             pred = parse_prediction(extracted)
@@ -490,10 +535,53 @@ def main(argv=None):
     pool = ThreadPoolExecutor(max_workers=args.concurrency)
     futures = []
     started = time.monotonic()
+
+    def document_cost(doc, rows):
+        paths = page_paths(args.images_dir, doc)
+        cost = native_page_info(paths)[0] + 16 * len(paths) + 512 + max(
+            len((INSTRUCTION + "\nQuestion: " + row["question"]).encode("utf-8")) for row in rows)
+        return min(cost, args.input_token_limit, args.max_model_len - args.max_tokens) \
+            if args.truncate_long_documents else cost
+
     try:
-        futures = [pool.submit(process, sample) for sample in todo]
-        for future in tqdm(as_completed(futures), total=len(todo), desc=args.stage, unit="题"):
-            future.result()
+        with tqdm(total=len(todo), desc=args.stage, unit="题") as bar:
+            if args.shard_strategy == "document" and args.document_window > 1:
+                print(f"滚动PDF上限={args.document_window}；冷请求上限={args.warmup_concurrency}；"
+                      f"提取上限={args.extraction_concurrency}；总请求上限={args.concurrency}；"
+                      f"前缀token预算={args.document_token_budget}。", flush=True)
+                run_document_pipeline(
+                    todo, pool, lambda row: process(row, generation_only=True),
+                    None if args.stage == "predict" else process,
+                    concurrency=args.concurrency, document_window=args.document_window,
+                    warmup_concurrency=args.warmup_concurrency,
+                    extraction_concurrency=args.extraction_concurrency,
+                    token_budget=args.document_token_budget, document_cost=document_cost,
+                    warmup=args.document_warmup, stopping=stopping,
+                    completed=lambda row: bar.update())
+            elif args.shard_strategy == "document":
+                groups = {}
+                for sample in todo:
+                    groups.setdefault(sample["doc_id"], []).append(sample)
+                for group in groups.values():
+                    # Do not submit the next PDF until this one drains. Finish
+                    # one cold request before siblings can look up its prefix.
+                    remaining = group
+                    if args.document_warmup and args.stage != "score":
+                        # On resume, a saved answer only needs extraction and
+                        # cannot warm a newly started engine's image prefix.
+                        first = next((s for s in group if not s.get("response")), group[0])
+                        process(first)
+                        bar.update()
+                        remaining = [s for s in group if s is not first]
+                    futures = [pool.submit(process, sample) for sample in remaining]
+                    for future in as_completed(futures):
+                        future.result()
+                        bar.update()
+            else:
+                futures = [pool.submit(process, sample) for sample in todo]
+                for future in as_completed(futures):
+                    future.result()
+                    bar.update()
     except BaseException:
         stopping.set()
         for future in futures:

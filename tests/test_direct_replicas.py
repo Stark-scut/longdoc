@@ -43,7 +43,10 @@ class Service:
                 answer="red" if images else "Extracted answer: red\nAnswer format: String"
                 self.send({"choices":[{"message":{"role":"assistant","content":answer},"finish_reason":"stop"}],
                            "usage":{"prompt_tokens":prompt_tokens,"completion_tokens":5,"total_tokens":prompt_tokens+5}})
-        self.server=http.server.ThreadingHTTPServer(("127.0.0.1",0),Handler)
+        try:
+            self.server=http.server.ThreadingHTTPServer(("127.0.0.1",0),Handler)
+        except PermissionError as exc:
+            raise unittest.SkipTest(f"Local HTTP sockets are unavailable: {exc}")
         self.server.daemon_threads=True
         self.port=self.server.server_port
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
@@ -81,6 +84,19 @@ class DirectReplicas(unittest.TestCase):
         self.assertEqual(text.count("--num-shards 4"),4)
         self.assertIn("max_model_len=262144",text)
         for i in range(4):self.assertIn("--shard-index "+str(i),text)
+        self.assertFalse(self.output.exists())
+
+    def test_rolling_sampling_and_invariance_options_reach_each_worker(self):
+        out=io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(runner.main(self.args()+[
+                "--document-window","4","--warmup-concurrency","2","--extraction-concurrency","2",
+                "--temperature","0","--extract-temperature","0","--seed","17",
+                "--batch-invariant","--dry-run"]),0)
+        text=out.getvalue()
+        for flag in ["--document-window 4","--warmup-concurrency 2","--extraction-concurrency 2",
+                     "--temperature 0.0","--extract-temperature 0.0","--seed 17","--batch-invariant"]:
+            self.assertEqual(text.count(flag),4,flag)
         self.assertFalse(self.output.exists())
 
     def test_one_and_three_gpu_plans_and_invalid_ports(self):
@@ -124,6 +140,8 @@ class DirectReplicas(unittest.TestCase):
             self.assertEqual(env["MAX_MODEL_LEN"],"262144")
             self.assertEqual(env["CPU_OFFLOAD_GB"],"0")
             self.assertEqual(env["PYTHON_BIN"],sys.executable)
+            self.assertEqual(env["MODEL_SEED"],"0")
+            self.assertEqual(env["VLLM_BATCH_INVARIANT"],"0")
         summary=json.loads((self.output/"merged.summary.json").read_text())
         self.assertEqual(summary["total"],8);self.assertEqual(summary["complete"],8)
         self.assertEqual(summary["accuracy_percent"],100)
@@ -211,13 +229,14 @@ class DirectReplicas(unittest.TestCase):
         env.pop("CONDA_DEFAULT_ENV",None);env.pop("CONDA_PREFIX",None)
         env.update(DRY_RUN="1",PYTHON_BIN=sys.executable,MODEL_PATH=str(self.model),GPU_IDS="7",
                    TENSOR_PARALLEL_SIZE="1",MAX_MODEL_LEN="262144",MAX_NUM_SEQS="8",
-                   ENABLE_PREFIX_CACHING="1",MM_PROCESSOR_CACHE_GB="1")
+                   ENABLE_PREFIX_CACHING="1",MM_PROCESSOR_CACHE_GB="1",MODEL_SEED="17")
         p=subprocess.run(["bash",str(DIRECT/"serve_qwen35_mmlongbench.sh")],
                          env=env,capture_output=True,text=True,timeout=15)
         self.assertEqual(p.returncode,0,p.stdout+p.stderr)
         self.assertIn("vllm.entrypoints.openai.api_server",p.stdout)
         self.assertIn("--enable-prefix-caching",p.stdout)
         self.assertIn("--mamba-cache-mode align",p.stdout)
+        self.assertIn("--seed 17",p.stdout)
 
     def test_fresh_clone_scoring_falls_back_to_bundled_files(self):
         isolated=self.root/"checkout";folder=isolated/"evaluations/direct_qa";folder.mkdir(parents=True)
@@ -226,6 +245,8 @@ class DirectReplicas(unittest.TestCase):
         shutil.copy2(ROOT/"agent/metrics/mmlongbench.py",isolated/"agent/metrics/mmlongbench.py")
         shutil.copy2(ROOT/"agent/prompts/extract.txt",isolated/"agent/prompts/extract.txt")
         shutil.copy2(DIRECT/"evaluate_qwen35_mmlongbench.py",folder/"evaluate_qwen35_mmlongbench.py")
+        shutil.copy2(DIRECT/"partitioning.py",folder/"partitioning.py")
+        shutil.copy2(DIRECT/"document_scheduler.py",folder/"document_scheduler.py")
         command=[sys.executable,str(folder/"evaluate_qwen35_mmlongbench.py"),"--input",str(self.input),
                  "--images-dir",str(self.images),"--native-resolution","--max-pixels","1048576","--dry-run"]
         p=subprocess.run(command,cwd=isolated,capture_output=True,text=True,timeout=15)
