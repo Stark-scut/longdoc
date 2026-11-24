@@ -109,9 +109,9 @@ python -m agent eval --config configs/agent/native.json \
   --output-dir output/agent/evidence_memory_4gpu_c16_mm3
 ```
 
-默认使用document调度：按完整已选题集的每份PDF题数做贪心负载均衡，一份PDF的题固定分给一张GPU。
-相同题集和GPU数量续跑时保留归卡关系；改变GPU数量时重新分配剩余题。
-每卡的worker从同一文件队列领题，快的worker继续领下一题，不受原先静态题单限制。
+默认使用document调度：按完整已选题集的每份PDF题数做贪心负载均衡，一份PDF的题固定分给一个vLLM服务（TP=1时即一张GPU）。
+相同题集和服务数量续跑时保留归属关系；改变服务数量时重新分配剩余题。
+每个服务的worker从同一文件队列领题，快的worker继续领下一题，不受原先静态题单限制。
 --document-window默认4：在4份仍有待领题目的PDF之间轮流发题；一份PDF的题全部被领走后即补入下一份，
 已经在执行的尾题可以继续运行。因此4不是GPU上所有在途PDF或实际缓存驻留量的硬上限。
 不会额外执行首题预热，也不会等待某份PDF完整跑完才补题；已有服务用--ports时也采用同样调度。
@@ -133,6 +133,51 @@ server*/server.log、workers日志与心跳、samples逐题结果及attempt日�
 LLM请求仍发送相同原图内容。回放会校验原图，源图移动、删除或内容变化后不能直接回放。
 需要搬运日志时使用--asset-mode copy保存图片副本。无来源路径的外部data URL也会保留副本，以免丢失回放数据。
 两种模式的旧日志均可回放；原来的输出目录与图片副本不会自动清理。
+
+## 8张RTX 3090：四个双卡服务
+
+先激活装有vLLM的Python环境，再执行：
+
+```bash
+# 只检查配置、四组GPU及调度，不启动GPU服务、不写结果。
+bash evaluations/agent/run_3090.sh --dry-run
+
+# 先用一组卡验证三道题。
+GPU_IDS=0,1 CONCURRENCY=1 bash evaluations/agent/run_3090.sh \
+  --indices 0,58,607 --output-dir output/agent/3090_tp2_memory_smoke
+
+# 全量1082题：8卡、4个服务、每服务并发4，总并发最多16题。
+bash evaluations/agent/run_3090.sh
+```
+
+默认保持BF16、无CPU权重offload、65536上下文，使用enforce-eager、每服务max-num-seqs=4、
+max-num-batched-tokens=4096、GPU memory utilization=0.90、prefix caching与MM processor cache 3GiB。
+这些是起步配置，实际能否容纳长输入须以服务启动的KV cache容量和小样本运行为准。
+
+脚本内部使用`--gpu-ids 0,1,2,3,4,5,6,7 --tensor-parallel-size 2`，按列表顺序组成
+`[0,1] [2,3] [4,5] [6,7]`，端口默认8071至8074。先看`nvidia-smi topo -m`，可通过
+`GPU_IDS=0,4,1,5,2,6,3,7`把组改为`[0,4] [1,5] [2,6] [3,7]`。
+GPU数量必须能被TP整除；自定义--ports时每个服务一个端口。
+
+`--concurrency-per-replica`与既有`--concurrency-per-gpu`、`--concurrency`是同一个参数；
+TP>1时均指每个服务的并发，不是每张物理GPU的并发。PDF归属、文档窗口和队列都以服务为单位，
+不会把同一PDF拆到多个服务。runtime.json、serverN/launch.json和dry-run记录实际GPU分组和TP。
+不传TP参数仍默认1，保留原单卡启动方式。已有外部TP服务使用--no-serve --ports，不在客户端传TP参数。
+
+路径与参数可覆盖：
+
+```bash
+PYTHON=/path/to/venv/bin/python MODEL_PATH=/path/to/Qwen3.5-9B \
+DATA_DIR=/path/to/mmlongbench CONCURRENCY=4 \
+bash evaluations/agent/run_3090.sh --output-dir output/agent/3090_custom
+```
+
+默认模型、数据路径沿用当前服务器实际位置，默认结果写入output/agent/3090_8gpu_tp2_memory_c4_mm3。
+稳定后可用CONCURRENCY=8在新输出目录尝试每服务8并发；脚本会同时设置max-num-seqs。
+脚本默认设置NCCL_IB_DISABLE=1、NCCL_NET=Socket以避开此前服务器RoCE初始化失败，保留GPU P2P；
+可通过同名环境变量覆盖。它不自动激活环境或安装依赖。
+
+## 实验隔离与续跑
 
 本版本使用**协议schema=3**，配置记录locator-evidence-memory、append-only和image-only。
 请用新输出目录；schema=2直接选页及更早Selector运行不能混入本次续跑。

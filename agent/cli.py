@@ -38,13 +38,16 @@ def parser():
     q.add_argument("--question", required=True)
     q.add_argument("--output-dir", type=Path)
     q = sub.choices["eval"]
-    q.add_argument("--gpu-ids")
+    q.add_argument("--gpu-ids", help="Ordered GPU IDs; consecutive groups of tensor-parallel-size form replicas")
+    q.add_argument("--tensor-parallel-size", type=int, default=1,
+                   help="GPUs per local vLLM service (default: 1)")
     q.add_argument("--ports")
     q.add_argument("--no-serve", action="store_true")
-    q.add_argument("--concurrency-per-gpu", "--concurrency", type=int, default=1)
+    q.add_argument("--concurrency-per-gpu", "--concurrency-per-replica", "--concurrency", type=int, default=1,
+                   help="Concurrent questions per vLLM service, including when a service spans multiple GPUs")
     q.add_argument("--shard-strategy", choices=("document", "sample"), default="document")
     q.add_argument("--document-window", type=int, default=4,
-                   help="PDFs per GPU with questions ready to claim; tails may remain in flight")
+                   help="PDFs per service with questions ready to claim; tails may remain in flight")
     q.add_argument("--max-num-seqs", type=int)
     q.add_argument("--max-num-batched-tokens", type=int)
     q.add_argument("--mm-processor-cache-gb", type=float)

@@ -1,4 +1,4 @@
-"""One full vLLM replica per selected GPU; isolated worker slots and safe cleanup."""
+"""One vLLM replica per GPU group; isolated worker slots and safe cleanup."""
 from __future__ import annotations
 import contextlib
 import copy
@@ -30,26 +30,36 @@ def work_plan(cases, pending, replicas, concurrency, strategy):
             assignments[f"{replica}:{n % concurrency}"].append(index)
     return partitions, assignments
 
-def gpu_ports(gpu_ids, ports, local):
+def gpu_groups(ids, tensor_parallel_size):
+    if type(tensor_parallel_size) is not int or tensor_parallel_size < 1:
+        raise ValueError("tensor-parallel-size must be a positive integer")
+    if len(ids) % tensor_parallel_size:
+        raise ValueError("The number of GPU IDs must be divisible by tensor-parallel-size")
+    return [ids[i:i + tensor_parallel_size] for i in range(0, len(ids), tensor_parallel_size)]
+
+def gpu_ports(gpu_ids, ports, local, tensor_parallel_size=1):
     ids = [] if not gpu_ids else [int(v.strip()) for v in gpu_ids.split(",")]
     if len(ids) != len(set(ids)) or any(i < 0 for i in ids):
         raise ValueError("GPU IDs must be distinct nonnegative integers")
     if local and not ids:
         raise ValueError("Pass --gpu-ids or use --no-serve for an existing service")
-    numbers = [int(v.strip()) for v in ports.split(",")] if ports else list(range(8071, 8071 + max(1, len(ids))))
+    groups = gpu_groups(ids, tensor_parallel_size)
+    if not local and tensor_parallel_size != 1:
+        raise ValueError("With --no-serve, configure tensor parallelism on the external servers and pass their --ports")
+    numbers = [int(v.strip()) for v in ports.split(",")] if ports else list(range(8071, 8071 + max(1, len(groups))))
     if len(numbers) != len(set(numbers)) or any(not 1 <= p <= 65535 for p in numbers):
         raise ValueError("Ports must be distinct values in 1..65535")
-    if ids and len(numbers) != len(ids):
-        raise ValueError("One port is required per selected GPU")
+    if ids and len(numbers) != len(groups):
+        raise ValueError("One port is required per GPU group / vLLM service")
     return ids, numbers
 
-def server_command(config, port, concurrency, max_num_seqs=None):
+def server_command(config, port, concurrency, max_num_seqs=None, tensor_parallel_size=1):
     settings = config["server"]
     base_url = config["roles"]["locator"]["url"]
     names = list(dict.fromkeys(s["model"] for s in config["roles"].values() if s["url"] == base_url))
     command = [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
         "--model", config["model_path"], "--served-model-name", *names,
-        "--host", "127.0.0.1", "--port", str(port), "--tensor-parallel-size", "1",
+        "--host", "127.0.0.1", "--port", str(port), "--tensor-parallel-size", str(tensor_parallel_size),
         "--dtype", "bfloat16", "--cpu-offload-gb", "0",
         "--gpu-memory-utilization", str(settings["gpu_memory_utilization"]),
         "--max-model-len", str(config["max_model_len"]),
@@ -171,14 +181,16 @@ def launch(args, config):
     if args.limit < 0 or args.ready_timeout <= 0:
         raise ValueError("limit must be nonnegative and ready-timeout positive")
     if args.concurrency_per_gpu < 1 or args.concurrency_per_gpu > 16:
-        raise ValueError("concurrency-per-gpu must be in 1..16")
+        raise ValueError("concurrency per replica must be in 1..16")
     if args.document_window < 1:
         raise ValueError("document-window must be positive")
     if args.max_num_seqs is not None and args.max_num_seqs < args.concurrency_per_gpu:
-        raise ValueError("max-num-seqs must be at least concurrency-per-gpu")
+        raise ValueError("max-num-seqs must be at least concurrency per replica")
     local = not args.no_serve
-    ids, ports = gpu_ports(args.gpu_ids, args.ports, local)
-    replicas = len(ports) if local else (len(ids) or len(ports))
+    tp = args.tensor_parallel_size
+    ids, ports = gpu_ports(args.gpu_ids, args.ports, local, tp)
+    groups = gpu_groups(ids, tp)
+    replicas = len(ports)
     if args.dry_run:
         cases = select_cases(config["samples"], args.indices, args.limit)
         for key in ("blocks", "images_dir"):
@@ -187,14 +199,16 @@ def launch(args, config):
         partitions, _ = work_plan(cases, [c["_sample_index"] for c in cases], replicas,
                                   args.concurrency_per_gpu, args.shard_strategy)
         by_index = {c["_sample_index"]: doc_key(c["doc_id"]) for c in cases}
-        print(json.dumps({"total": len(cases), "gpu_ids": ids, "ports": ports,
+        print(json.dumps({"total": len(cases), "gpu_ids": ids, "gpu_groups": groups,
+                          "tensor_parallel_size": tp, "ports": ports,
+                          "concurrency_per_replica": args.concurrency_per_gpu,
                           "concurrency_per_gpu": args.concurrency_per_gpu,
                           "shard_strategy": args.shard_strategy, "document_window": args.document_window,
                           "asset_mode": args.asset_mode,
                           "replicas": [{"replica": i, "questions": len(part),
                                         "documents": len({by_index[n] for n in part})}
                                        for i, part in enumerate(partitions)],
-                          "commands": [server_command(config, p, args.concurrency_per_gpu, args.max_num_seqs)
+                          "commands": [server_command(config, p, args.concurrency_per_gpu, args.max_num_seqs, tp)
                                        for p in ports] if local else [],
                           "config": config, "writes": False}, ensure_ascii=False, indent=2))
         return 0
@@ -234,7 +248,9 @@ def launch(args, config):
                 raise ValueError("A requested port is occupied; existing services will not be stopped")
             check_gpus(ids)
         partitions, assignments = work_plan(cases, pending, replicas, args.concurrency_per_gpu, args.shard_strategy)
-        runtime = {"run_id": uuid.uuid4().hex, "gpu_ids": ids, "ports": ports, "local_servers": local, "map_replicas": local or args.ports is not None,
+        runtime = {"run_id": uuid.uuid4().hex, "gpu_ids": ids, "gpu_groups": groups,
+                   "tensor_parallel_size": tp, "ports": ports, "local_servers": local, "map_replicas": local or args.ports is not None,
+                   "concurrency_per_replica": args.concurrency_per_gpu,
                    "concurrency_per_gpu": args.concurrency_per_gpu, "assignments": assignments,
                    "shard_strategy": args.shard_strategy, "document_window": args.document_window,
                    "asset_mode": args.asset_mode,
@@ -259,21 +275,24 @@ def launch(args, config):
         try:
             with interrupt_handler():
                 if local:
-                    for i, gpu in enumerate(ids):
+                    for i, group in enumerate(groups):
                         folder = root / f"server{i}"; folder.mkdir(exist_ok=True)
                         handle = (folder / "server.log").open("a"); handles.append(handle)
                         cache = tempfile.mkdtemp(prefix="longdoc_vllm_"); caches.append(cache)
                         env = os.environ.copy()
-                        env.update(CUDA_VISIBLE_DEVICES=str(gpu), CUDA_DEVICE_ORDER="PCI_BUS_ID",
+                        env.update(CUDA_VISIBLE_DEVICES=",".join(map(str, group)), CUDA_DEVICE_ORDER="PCI_BUS_ID",
                                    PYTHONUNBUFFERED="1", TRITON_CACHE_DIR=cache + "/triton",
                                    TORCHINDUCTOR_CACHE_DIR=cache + "/inductor", VLLM_CACHE_ROOT=cache + "/vllm")
                         env["LIBRARY_PATH"] = "/usr/lib/x86_64-linux-gnu:" + env.get("LIBRARY_PATH", "")
                         for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "NPROC_PER_NODE") :
                             env.pop(key, None)
-                        command = server_command(config, ports[i], args.concurrency_per_gpu, args.max_num_seqs)
+                        command = server_command(config, ports[i], args.concurrency_per_gpu, args.max_num_seqs, tp)
                         process = subprocess.Popen(command, env=env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
                         servers.append(process)
-                        atomic(folder / "launch.json", {"pid": process.pid, "gpu": gpu, "command": command})
+                        record = {"pid": process.pid, "gpu_ids": group, "tensor_parallel_size": tp, "command": command}
+                        if tp == 1:
+                            record["gpu"] = group[0]
+                        atomic(folder / "launch.json", record)
                     wait_ready(servers, ports, config, args.ready_timeout)
                 folder = root / "workers"; folder.mkdir(exist_ok=True)
                 for key, indices in assignments.items():
