@@ -1,6 +1,7 @@
 """Immutable run snapshots, per-slot evaluation workers and aggregate results."""
 from __future__ import annotations
 import copy
+from contextlib import nullcontext
 import fcntl
 import json
 import os
@@ -164,7 +165,14 @@ def worker(root, replica, slot):
     config["captions"] = str(root / "snapshot/inputs/captions.jsonl")
     cases = {c["_sample_index"]: c for c in read(root / "snapshot/inputs/cases.json")}
     assigned = runtime["assignments"].get(f"{replica}:{slot}", [])
-    documents = Documents(config, [cases[i]["doc_id"] for i in assigned]) if assigned else None
+    queue_path = runtime.get("queues", {}).get(str(replica))
+    queue = None
+    if queue_path:
+        from .scheduling import DocumentQueue
+        queue = DocumentQueue(root / queue_path)
+        assigned = runtime["replica_indices"][str(replica)]
+    documents = Documents(config, [cases[i]["doc_id"] for i in assigned],
+                          max_cached=runtime.get("document_window", 4)) if assigned else None
     inventory = read(root / "snapshot/inputs/assets.json")
     verified = set()
     heartbeat_path = root / "workers" / f"replica{replica}_slot{slot}.json"
@@ -180,67 +188,72 @@ def worker(root, replica, slot):
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupt)
     atomic(heartbeat_path, state)
-    for index in assigned:
-        case = cases[index]; path = result_path(root, index); path.parent.mkdir(parents=True, exist_ok=True)
-        with (path.parent / ".sample.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            old = read(path) if path.exists() else None
-            if old and old.get("input_fingerprint") != run["fingerprint"]:
-                raise ValueError("Sample fingerprint mismatch")
-            if not needs_work(old, runtime["stage"], runtime["retry_failed"]):
-                continue
-            attempts = [int(p.stem.split("_")[-1]) for p in path.parent.glob("attempt_*.jsonl")]
-            trace = path.parent / f"attempt_{max(attempts, default=0) + 1:04d}.jsonl"
-            audit = Audit(trace, root / "assets", heartbeat)
-            client = Client(config, audit)
-            result = None
-            state.update(status="running", sample_index=index, phase="agent")
-            audit.emit("sample_start", sample_index=index, question=case["question"],
-                       doc_id=case["doc_id"], run_id=runtime["run_id"])
-            try:
-                reuse = old and (old.get("execution_status") == "completed" or runtime["stage"] == "score")
-                if reuse:
-                    result = copy.deepcopy(old)
-                    audit.emit("reuse_agent_output", agent_trace=result.get("agent_trace"))
-                else:
+    try:
+        with (queue.work(slot) if queue else nullcontext(iter(assigned))) as tasks:
+            for index in tasks:
+                case = cases[index]; path = result_path(root, index); path.parent.mkdir(parents=True, exist_ok=True)
+                with (path.parent / ".sample.lock").open("a") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    old = read(path) if path.exists() else None
+                    if old and old.get("input_fingerprint") != run["fingerprint"]:
+                        raise ValueError("Sample fingerprint mismatch")
+                    if not needs_work(old, runtime["stage"], runtime["retry_failed"]):
+                        continue
+                    attempts = [int(p.stem.split("_")[-1]) for p in path.parent.glob("attempt_*.jsonl")]
+                    trace = path.parent / f"attempt_{max(attempts, default=0) + 1:04d}.jsonl"
+                    audit = Audit(trace, root / "assets", heartbeat, asset_mode=runtime.get("asset_mode", "copy"))
+                    client = Client(config, audit)
+                    result = None
+                    state.update(status="running", sample_index=index, phase="agent")
+                    audit.emit("sample_start", sample_index=index, question=case["question"],
+                               doc_id=case["doc_id"], run_id=runtime["run_id"])
                     try:
-                        doc_id = doc_key(case["doc_id"])
-                        if doc_id not in verified:
-                            for item in inventory[doc_id]:
-                                if sha(item["path"]) != item["sha256"]:
-                                    raise Failure("input_asset_changed", item["path"])
-                            verified.add(doc_id)
-                        result = Agent(documents[case["doc_id"]], client, audit, config).run(case["question"])
-                    except Exception as exc:
-                        failure = exc if isinstance(exc, Failure) else Failure("input_or_agent_error", str(exc))
-                        result = {"execution_status": "error", "stop_reason": failure.code,
-                                  "raw_answer": None, "rounds": 0, "error": failure.as_dict(), "evidence_pages": []}
-                    result.update(sample_index=index, doc_id=case["doc_id"], question=case["question"],
-                                  input_fingerprint=run["fingerprint"], agent_trace=str(trace),
-                                  scoring_status="pending", phase="agent_saved", agent_cost=audit.costs())
-                    atomic(path, {**result, "cost": add_cost((old or {}).get("cost"), audit.costs())})
-                if runtime["stage"] != "agent":
-                    state["phase"] = "score"; client.deadline = None
-                    for key in ("pred", "extracted_res", "score", "answer_correct", "scoring_error"):
-                        result.pop(key, None)
-                    try:
-                        audit.context = {"source": "offline_evaluation"}
-                        score(result, case, client)
-                    except Exception as exc:
-                        result.update(score=0.0, scoring_status="error", scoring_error=str(exc))
-                        audit.emit("scoring_error", error=str(exc))
-                result.update(latest_trace=str(trace), run_id=runtime["run_id"], phase="done",
-                              cost=add_cost((old or {}).get("cost"), audit.costs()), updated_at=stamp())
-                atomic(path, result)
-                print(f"#{index:04d} {result['execution_status']} stop={result['stop_reason']} score={result.get('score')}", flush=True)
-            except Interrupted:
-                if result is not None:
-                    atomic(path, {**result, "cost": add_cost((old or {}).get("cost"), audit.costs()),
-                                  "latest_trace": str(trace), "updated_at": stamp()})
-                state.update(status="interrupted", updated_at=stamp()); atomic(heartbeat_path, state)
-                return 130
-            finally:
-                client.close()
-        state.update(status="between_samples", updated_at=stamp()); atomic(heartbeat_path, state)
+                        reuse = old and (old.get("execution_status") == "completed" or runtime["stage"] == "score")
+                        if reuse:
+                            result = copy.deepcopy(old)
+                            audit.emit("reuse_agent_output", agent_trace=result.get("agent_trace"))
+                        else:
+                            try:
+                                doc_id = doc_key(case["doc_id"])
+                                if doc_id not in verified:
+                                    for item in inventory[doc_id]:
+                                        if sha(item["path"]) != item["sha256"]:
+                                            raise Failure("input_asset_changed", item["path"])
+                                    verified.add(doc_id)
+                                result = Agent(documents[case["doc_id"]], client, audit, config).run(case["question"])
+                            except Exception as exc:
+                                failure = exc if isinstance(exc, Failure) else Failure("input_or_agent_error", str(exc))
+                                result = {"execution_status": "error", "stop_reason": failure.code,
+                                          "raw_answer": None, "rounds": 0, "error": failure.as_dict(), "evidence_pages": []}
+                            result.update(sample_index=index, doc_id=case["doc_id"], question=case["question"],
+                                          input_fingerprint=run["fingerprint"], agent_trace=str(trace),
+                                          scoring_status="pending", phase="agent_saved", agent_cost=audit.costs())
+                            atomic(path, {**result, "cost": add_cost((old or {}).get("cost"), audit.costs())})
+                        if runtime["stage"] != "agent":
+                            state["phase"] = "score"; client.deadline = None
+                            for key in ("pred", "extracted_res", "score", "answer_correct", "scoring_error"):
+                                result.pop(key, None)
+                            try:
+                                audit.context = {"source": "offline_evaluation"}
+                                score(result, case, client)
+                            except Exception as exc:
+                                result.update(score=0.0, scoring_status="error", scoring_error=str(exc))
+                                audit.emit("scoring_error", error=str(exc))
+                        result.update(latest_trace=str(trace), run_id=runtime["run_id"], phase="done",
+                                      cost=add_cost((old or {}).get("cost"), audit.costs()), updated_at=stamp())
+                        atomic(path, result)
+                        print(f"#{index:04d} {result['execution_status']} stop={result['stop_reason']} score={result.get('score')}", flush=True)
+                    except Interrupted:
+                        if result is not None:
+                            atomic(path, {**result, "cost": add_cost((old or {}).get("cost"), audit.costs()),
+                                          "latest_trace": str(trace), "updated_at": stamp()})
+                        state.update(status="interrupted", updated_at=stamp()); atomic(heartbeat_path, state)
+                        return 130
+                    finally:
+                        client.close()
+                state.update(status="between_samples", updated_at=stamp()); atomic(heartbeat_path, state)
+    except Interrupted:
+        state.update(status="interrupted", updated_at=stamp()); atomic(heartbeat_path, state)
+        return 130
     state.update(status="finished", updated_at=stamp()); atomic(heartbeat_path, state)
     return 0

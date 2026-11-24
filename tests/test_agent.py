@@ -574,7 +574,8 @@ class Integration(Base):
     def test_existing_service_ports_route_to_distinct_replicas(self):
         second=Fixture()
         try:
-            self.execute(["--ports",str(self.fixture.server.server_port)+","+str(second.server.server_port)])
+            self.execute(["--ports",str(self.fixture.server.server_port)+","+str(second.server.server_port),
+                          "--shard-strategy","sample"])
             self.assertTrue(self.fixture.requests)
             self.assertTrue(second.requests)
             self.assertEqual(read(self.root/"output/summary.json")["scored"],4)

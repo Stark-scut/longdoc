@@ -1,6 +1,6 @@
 """Read MMLongBench inputs without changing source paths, OCR or images."""
 from __future__ import annotations
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 import json
 import math
@@ -94,7 +94,9 @@ class Document:
         return parts
 
 class Documents:
-    def __init__(self, config, doc_ids):
+    def __init__(self, config, doc_ids, max_cached=None):
+        if max_cached is not None and max_cached < 1:
+            raise ValueError("max_cached must be positive")
         self.config = config
         wanted = {doc_key(name) for name in doc_ids}
         records = {name: {} for name in wanted}
@@ -121,30 +123,43 @@ class Documents:
                     if doc in captions:
                         page = int(row["page"])
                         captions[doc][page] = captions[doc].get(page, "") + " " + row.get("caption", "")
-        self.documents = {}
-        for doc in sorted(wanted):
-            images = list((Path(config["images_dir"]) / doc).glob("page_*.png"))
-            if not images:
-                raise ValueError("Missing page images: " + doc)
-            crops = Path(config["crop_root"]) / doc
-            pages = {}
-            for image in images:
-                index = int(image.stem.split("_")[-1])
-                blocks = records[doc].get(index, [])
-                crop_paths = {}
-                for block in blocks:
-                    block_id = str(block.get("block_id"))
-                    matches = sorted(crops.glob(image.name + "_b" + block_id + ".*"))
-                    if matches:
-                        crop_paths[block_id] = matches[0]
-                pages[index] = Page(index, image, blocks, crop_paths)
-            extra = set(records[doc]) - set(pages)
-            if extra:
-                raise ValueError(f"OCR pages without image: {doc}/{sorted(extra)}")
-            self.documents[doc] = Document(doc, pages, captions[doc])
+        self.records, self.captions = records, captions
+        self.max_cached = max_cached
+        self.documents = OrderedDict()
+        if max_cached is None:
+            for doc in sorted(wanted):
+                self[doc]
+
+    def _load(self, doc):
+        images = list((Path(self.config["images_dir"]) / doc).glob("page_*.png"))
+        if not images:
+            raise ValueError("Missing page images: " + doc)
+        crops = Path(self.config["crop_root"]) / doc
+        pages = {}
+        for image in images:
+            index = int(image.stem.split("_")[-1])
+            blocks = self.records[doc].get(index, [])
+            crop_paths = {}
+            for block in blocks:
+                block_id = str(block.get("block_id"))
+                matches = sorted(crops.glob(image.name + "_b" + block_id + ".*"))
+                if matches:
+                    crop_paths[block_id] = matches[0]
+            pages[index] = Page(index, image, blocks, crop_paths)
+        extra = set(self.records[doc]) - set(pages)
+        if extra:
+            raise ValueError(f"OCR pages without image: {doc}/{sorted(extra)}")
+        return Document(doc, pages, self.captions[doc])
 
     def __getitem__(self, doc_id):
-        return self.documents[doc_key(doc_id)]
+        doc = doc_key(doc_id)
+        if doc not in self.documents:
+            self.documents[doc] = self._load(doc)
+            if self.max_cached is not None:
+                while len(self.documents) > self.max_cached:
+                    self.documents.popitem(last=False)
+        self.documents.move_to_end(doc)
+        return self.documents[doc]
 
 def select_cases(path, indices=None, limit=0):
     samples = json.loads(Path(path).read_text())

@@ -16,5 +16,8 @@
   "pipeline": "locator-direct-evidence",
   "locator_read_page_format": "image-only",
   "locator_tool_choice": "required",
-  "max_protocol_corrections": 2
+  "max_protocol_corrections": 2,
+  "server": {
+    "mm_processor_cache_gb": 3.0
+  }
 }

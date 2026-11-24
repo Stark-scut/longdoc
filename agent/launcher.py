@@ -16,9 +16,19 @@ import time
 import uuid
 import httpx
 from tqdm import tqdm
-from .documents import select_cases
+from .documents import select_cases, doc_key
 from .evaluation import prepare, verify, aggregate, needs_work, result_path
 from .logging import atomic, read, stamp
+from .scheduling import DocumentQueue, partition_documents
+
+def work_plan(cases, pending, replicas, concurrency, strategy):
+    partitions = (partition_documents(cases, pending, replicas) if strategy == "document"
+                  else [pending[i::replicas] for i in range(replicas)])
+    assignments = {f"{i}:{j}": [] for i in range(replicas) for j in range(concurrency)}
+    for replica, indices in enumerate(partitions):
+        for n, index in enumerate(indices):
+            assignments[f"{replica}:{n % concurrency}"].append(index)
+    return partitions, assignments
 
 def gpu_ports(gpu_ids, ports, local):
     ids = [] if not gpu_ids else [int(v.strip()) for v in gpu_ids.split(",")]
@@ -162,17 +172,28 @@ def launch(args, config):
         raise ValueError("limit must be nonnegative and ready-timeout positive")
     if args.concurrency_per_gpu < 1 or args.concurrency_per_gpu > 16:
         raise ValueError("concurrency-per-gpu must be in 1..16")
+    if args.document_window < 1:
+        raise ValueError("document-window must be positive")
     if args.max_num_seqs is not None and args.max_num_seqs < args.concurrency_per_gpu:
         raise ValueError("max-num-seqs must be at least concurrency-per-gpu")
     local = not args.no_serve
     ids, ports = gpu_ports(args.gpu_ids, args.ports, local)
+    replicas = len(ports) if local else (len(ids) or len(ports))
     if args.dry_run:
         cases = select_cases(config["samples"], args.indices, args.limit)
         for key in ("blocks", "images_dir"):
             if not Path(config[key]).exists():
                 raise ValueError("Missing " + key + ": " + config[key])
+        partitions, _ = work_plan(cases, [c["_sample_index"] for c in cases], replicas,
+                                  args.concurrency_per_gpu, args.shard_strategy)
+        by_index = {c["_sample_index"]: doc_key(c["doc_id"]) for c in cases}
         print(json.dumps({"total": len(cases), "gpu_ids": ids, "ports": ports,
                           "concurrency_per_gpu": args.concurrency_per_gpu,
+                          "shard_strategy": args.shard_strategy, "document_window": args.document_window,
+                          "asset_mode": args.asset_mode,
+                          "replicas": [{"replica": i, "questions": len(part),
+                                        "documents": len({by_index[n] for n in part})}
+                                       for i, part in enumerate(partitions)],
                           "commands": [server_command(config, p, args.concurrency_per_gpu, args.max_num_seqs)
                                        for p in ports] if local else [],
                           "config": config, "writes": False}, ensure_ascii=False, indent=2))
@@ -202,21 +223,29 @@ def launch(args, config):
         if not pending:
             summary = aggregate(root, args.stage, True)
             print(json.dumps(summary, ensure_ascii=False, indent=2)); return 0
+        if not (root / "snapshot/agent/scheduling.py").is_file() and (
+                args.shard_strategy != "sample" or args.asset_mode != "copy"):
+            raise ValueError("Saved snapshot predates document queues/path references; use a new output directory "
+                             "or resume with --shard-strategy sample --asset-mode copy and its original config")
         if local:
             if not (Path(config["model_path"]) / "config.json").is_file():
                 raise ValueError("Missing model config.json: " + config["model_path"])
             if any(not port_available(p) for p in ports):
                 raise ValueError("A requested port is occupied; existing services will not be stopped")
             check_gpus(ids)
-        replicas = len(ports) if local else (len(ids) or len(ports))
-        assignments = {f"{i}:{j}": [] for i in range(replicas) for j in range(args.concurrency_per_gpu)}
-        for n, index in enumerate(pending):
-            replica = n % replicas
-            slot = (n // replicas) % args.concurrency_per_gpu
-            assignments[f"{replica}:{slot}"].append(index)
+        partitions, assignments = work_plan(cases, pending, replicas, args.concurrency_per_gpu, args.shard_strategy)
         runtime = {"run_id": uuid.uuid4().hex, "gpu_ids": ids, "ports": ports, "local_servers": local, "map_replicas": local or args.ports is not None,
                    "concurrency_per_gpu": args.concurrency_per_gpu, "assignments": assignments,
+                   "shard_strategy": args.shard_strategy, "document_window": args.document_window,
+                   "asset_mode": args.asset_mode,
                    "stage": args.stage, "retry_failed": args.retry_failed, "created_at": stamp()}
+        if args.shard_strategy == "document":
+            runtime["replica_indices"] = {str(i): part for i, part in enumerate(partitions)}
+            runtime["queues"] = {}
+            for i, part in enumerate(partitions):
+                relative = f"queues/{runtime['run_id']}_replica{i}.json"
+                DocumentQueue.create(root / relative, cases, part, args.document_window)
+                runtime["queues"][str(i)] = relative
         atomic(root / "runtime.json", runtime)
         with (root / "run_history.jsonl").open("a") as f:
             f.write(json.dumps(runtime, ensure_ascii=False) + "\n")

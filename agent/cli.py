@@ -17,6 +17,8 @@ def parser():
     for command in ("doctor", "run", "eval"):
         q = sub.add_parser(command)
         q.add_argument("--config", type=Path)
+        q.add_argument("--asset-mode", choices=("reference", "copy"), default="reference",
+                       help="Log original image paths/hashes, or copy images for portable logs")
         q.add_argument("--data-dir", type=Path)
         for name in ("samples", "blocks", "images-dir", "crop-root", "captions", "model-path"):
             q.add_argument("--" + name, type=Path)
@@ -40,6 +42,9 @@ def parser():
     q.add_argument("--ports")
     q.add_argument("--no-serve", action="store_true")
     q.add_argument("--concurrency-per-gpu", "--concurrency", type=int, default=1)
+    q.add_argument("--shard-strategy", choices=("document", "sample"), default="document")
+    q.add_argument("--document-window", type=int, default=4,
+                   help="PDFs per GPU with questions ready to claim; tails may remain in flight")
     q.add_argument("--max-num-seqs", type=int)
     q.add_argument("--max-num-batched-tokens", type=int)
     q.add_argument("--mm-processor-cache-gb", type=float)
@@ -155,7 +160,7 @@ def main(argv=None):
             raise ValueError("Outputs must be outside agent/")
         doc = Documents(config, [args.doc_id])[args.doc_id]
         validate_images(doc, config["max_pixels"])
-        audit = Audit(root / "trace.jsonl")
+        audit = Audit(root / "trace.jsonl", asset_mode=args.asset_mode)
         client = Client(config, audit)
         try:
             result = Agent(doc, client, audit, config).run(args.question)
