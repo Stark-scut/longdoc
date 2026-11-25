@@ -17,6 +17,7 @@ Locator → call_reasoner({}) → Reasoner读取全部memory页面 → answerabl
 - 空列表、未读页、非法页号不能store；空memory不能推理，均返回可纠正错误，不调用Reasoner模型。
 - search只在OCR/caption上进行文本检索并返回简短摘要；本轮没有视觉/混合检索。
 - 页面图像与原生assistant/tool历史仍持续保留，当前没有历史压缩。
+- 每轮最后一条tool结果追加`<agent_status>`：轮次预算、合法/已读页、memory、工具次数、上次Reasoner反馈和本轮错误；保留原图与原tool_call_id，不为状态栏增加user消息。初始状态位于system中，旧状态保留，最新状态为准。
 - 新读页的图像观察须先交给Locator，下一轮才可store；store→call_reasoner可同批顺序执行。前一个工具失败后，其余调用返回dependency_failed，下一轮由Locator纠正。
 - memory保存原始页面引用，不复制图片；不会因上下文不足自动丢页，服务端上下文/图像限制会如实记录失败。
 

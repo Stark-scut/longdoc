@@ -67,6 +67,23 @@ max_rounds仍计Locator请求轮次，默认15；store是本地工具，不自�
 
 纠正次数、轮数和时间预算继续按配置约束；技术失败不转成语义不可回答。
 
+## Locator状态栏
+
+每个完整工具批次结束后，控制器将一个`<agent_status>`文本块附到最后一条真实tool消息的content末尾。
+保留原tool_call_id、原结果和图片；不新增tool消息，也不为状态栏追加普通user消息。旧消息与旧状态栏保持原样。
+首轮还没有工具结果，初始状态只加入初始system消息。最新状态栏代表当前状态，旧块是历史记录。
+
+格式包含Round Budget、Document State、Evidence Memory、Tool Statistics、Reasoner Feedback和Recent Errors。
+第11轮结束后将显示第12/15轮、已完成11轮、含下一次请求还剩4轮；终止时剩余轮数为0，不显示16/15。
+页号范围按真实页面索引压缩，读过未存的页由集合差计算；该差集不意味着全部相关或必须入库。
+Reasoner反馈保留上次实际评估的memory版本，便于识别其是否落后于当前memory。
+工具计数包含失败尝试，不包含跳过调用；Recent Errors包含刚结束批次的全部错误，包括前序错误和依赖跳过。
+
+原始tool_result事件仍保留原观察，新增agent_status事件记录增强后的最终消息，history_checkpoint和后续llm_request包含实际输入。
+此改动不增加模型调用、不自动store、不强制调度，也不改变15轮/输出token/上下文预算。
+既有提前输出普通答案时的user协议纠正分支未变；它与状态栏分开处理，不伪造工具结果。
+请使用新输出目录验证状态栏，已有运行的冻结快照不会自动启用此改动。
+
 ## 结果与兼容性
 
 `agent`版本0.3.0。配置使用：
@@ -117,7 +134,7 @@ python -m agent eval --config configs/agent/native.json \
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tests \
   /media/data5/leizh/longdoc/.venv_grpo/bin/python -B -m unittest \
-  test_agent.Contracts test_agent_performance test_evidence_memory -v
+  test_agent.Contracts test_agent_performance test_evidence_memory test_agent_status -v
 ```
 
 测试覆盖追加去重、版本、未读页/非法页/原子store、题目隔离、不可变推理快照、无参数接口、同批依赖失败、

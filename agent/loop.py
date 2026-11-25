@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 from .client import Failure, completed
 from .evidence import EvidenceMemory
+from .status import append_status, format_status
 from .tools import Tools, schemas
 
 PROMPT = (Path(__file__).parent / "prompts/locator.txt").read_text()
@@ -48,7 +49,9 @@ class Agent:
     def run(self, question):
         evidence = EvidenceMemory(self.document)
         tools = Tools(question, evidence, self.client, self.audit, self.config)
-        messages = [{"role": "system", "content": PROMPT + "\nDocument outline:\n" + self.document.outline() + ROUTING_REMINDER},
+        initial_status = format_status(evidence, tools, self.config, 0)
+        messages = [{"role": "system", "content": PROMPT + "\nDocument outline:\n" + self.document.outline() + ROUTING_REMINDER
+                     + "\n\n" + initial_status},
                     {"role": "user", "content": question}]
         status, stop, error = "incomplete", "max_rounds", None
         rounds = 0
@@ -114,6 +117,7 @@ class Agent:
                 fatal = None
                 answered = False
                 batch_failed = False
+                batch_errors = []
                 observed_read_pages = frozenset(evidence.read_pages)
                 for call in calls:
                     if answered or fatal or batch_failed:
@@ -132,7 +136,15 @@ class Agent:
                         if not outcome["ok"] and not outcome["error"]["retryable"]:
                             fatal = outcome["error"]
                         answered = (tools.last_reason or {}).get("status") == "answerable"
+                    if not outcome["ok"]:
+                        batch_errors.append({"tool": call["function"]["name"], **outcome["error"]})
                     messages.append(observation)
+                terminal = bool(fatal or answered or rounds == self.config["max_rounds"])
+                agent_status = format_status(evidence, tools, self.config, rounds, batch_errors, terminal=terminal)
+                append_status(messages[-1], agent_status)
+                self.audit.emit("agent_status", tool_call_id=messages[-1]["tool_call_id"],
+                                completed_rounds=rounds, terminal=terminal,
+                                text=agent_status, message=messages[-1])
                 validate_history(messages)
                 self.audit.emit("history_checkpoint", messages=messages)
                 if fatal:
