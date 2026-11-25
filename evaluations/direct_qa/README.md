@@ -1,5 +1,62 @@
 # Qwen3.5-9B：MMLongBench-Doc 全文页图直接评测
 
+## 仅证据页 + OCR + crop 的 e2e 对照实验
+
+新入口 `run_gold_evidence_ocr_crops.py` 对应原入口
+`run_answerable.py --gold-evidence-only`，区别仅在输入：
+
+- 原模式：GT 证据整页图。
+- 新模式：同样的 GT 证据整页图，以及**仅这些页**的 OCR blocks 和可用 crop。
+
+新模式直接复用 `agent.documents.Page.parts()`，与 Reasoner 的证据内容渲染一致。
+按页发送整页图，再发送该页各 block 的 OCR 和已有 crop，不补入其他页面。
+不存在 crop 的 block 仍发送 OCR；选定页缺少 OCR 记录时直接报错。
+它运行一次 e2e 问答，不运行 Locator/Reasoner 循环，不使用 Reasoner 的提示词或 JSON 输出协议。
+系统使用的问答指令与原 e2e **完全相同**：
+
+```text
+Read all pages of the document and answer the question based on the document. If the question cannot be answered from the document, answer 'Not answerable'.
+```
+
+问题放在证据内容之后，仍为 `Question: ...`。短答案抽取提示词、官方评分函数也保持不变；
+回答和抽取默认均为 temperature=0、seed=0、关闭 thinking。
+GT 答案不进入模型输入，GT 页号只用于离线选择证据页。这是使用标注证据的对照实验。
+
+在本服务器，从仓库根目录先检查全部数据：
+
+```bash
+python evaluations/direct_qa/run_gold_evidence_ocr_crops.py \
+  --agent-dir output/agent/3090_8gpu_tp2_memory_c4_mm3 \
+  --gpu-ids 0,1,2,3 \
+  --concurrency 4 \
+  --output-dir output/mmlongbench/qwen35_gold_ocr_crops \
+  --dry-run
+```
+
+去掉 `--dry-run` 启动评测。小规模验证可使用 `--gpu-ids 0 --limit 4` 和独立输出目录；
+切回多 GPU 全量评测时使用新目录，避免混用不同分片结果。
+这里每张卡部署一个完整 BF16 / TP=1 模型，沿用原 e2e 多副本入口，适用于空闲 A100/A6000；
+`--agent-dir` 只提供冻结题集、页面清单和数据/模型路径，不沿用该 Agent 实验的 TP=2 部署。
+迁移服务器时可覆盖 `--model-path`、`--images-dir`、`--blocks`、`--crop-root`。
+
+入口沿用原证据页评测的筛选规则：只评可回答题，GT 页号从 1 起始转换为 0 起始；
+空证据或越界题在启动时列出并排除。以以上冻结实验为例，859 道可回答题中保留 838 道。
+新模式禁止截掉页面/crop；整页保持原分辨率，crop 沿用每图 1048576 像素上限，
+超大 crop 与 Reasoner 一样由服务端预处理缩放。
+整页和 crop 都计入图片数量上限和视觉 token 估算，
+文本和模板也会占用上下文，最终以服务端检查为准，超限记录失败。
+相同 PDF 固定分配给同一 GPU，沿用滚动 PDF 调度及 Prefix/MM cache；不同证据页集合不保证完整前缀命中。
+
+结果沿用 `merged.json`、`merged.summary.json`、`merged.txt` 和 `comparison.txt`。
+逐题新增 `generation_input`，记录实际证据页号、OCR block 数、crop 数和源图片路径；
+不额外复制图片。配置记录输入模式、OCR SHA256 和图片清单指纹（路径/大小/修改时间），
+阻止混用图片模式或数据变更前的回答。
+已有输出请使用新目录。原 `--gold-evidence-only` 行为保持不变。
+
+如使用已有服务而不自动部署，可用 `evaluate_qwen35_mmlongbench.py`
+搭配 `--evidence-ocr-crops --blocks ... --crop-root ...`；其输入 JSON 每题必须显式包含
+`input_page_indices: [0, ...]`，同时不要启用 `--truncate-long-documents`。
+
 ## 当前 A100 环境的 Prefix cache 修复与文档分片
 
 本地 vLLM 0.24.0 的多图 Mamba 对齐停滞已应用兼容补丁，原分片配置已在 A100
@@ -20,7 +77,7 @@ GPU、输入、模型、页面设置均由脚本指定；结果写入独立的 `
 
 推荐入口是 `run_replicas.py`：任意数量 GPU，每卡一个完整 BF16 / TP=1 模型，默认无 CPU 权重 offload。
 这里运行直接问答，不运行 Agent：文档页图在前、原始问题在后，生成回答、抽取短答案，再与 GT 计算官方 ACC / F1。
-模型请求不包含 GT、gold evidence 或 OCR。
+默认全文页图模式的模型请求不包含 GT 答案、gold evidence 标记或 OCR。
 
 ## 四张 A6000，每张卡并发 8
 

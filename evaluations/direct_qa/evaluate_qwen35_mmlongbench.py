@@ -83,6 +83,32 @@ def sample_page_sets(images_dir, samples):
     return [select_input_pages(paths[sample["doc_id"]], sample) for sample in samples]
 
 
+def evidence_inputs(args, samples, page_sets):
+    if not args.evidence_ocr_crops:
+        return None
+    if args.truncate_long_documents:
+        raise ValueError('OCR/crop evidence inputs require --no-truncate-long-documents')
+    if not args.blocks or not args.crop_root:
+        raise ValueError('OCR/crop evidence inputs require --blocks and --crop-root')
+    if any(sample.get('input_page_indices') is None for sample in samples):
+        raise ValueError('OCR/crop mode requires explicit input_page_indices for every question; use the gold-evidence runner')
+    from evidence_input import EvidenceInput
+    return EvidenceInput(page_sets, args.blocks, args.crop_root)
+
+
+def input_image_info(paths, evidence=None, max_pixels=None):
+    """Preserve native full pages; crops follow the same pixel cap as Reasoner.
+
+    Large crops may be resized by the model processor. Capped area is an upper
+    estimate for their aligned visual tokens, not an OCR/text token estimate.
+    """
+    tokens, largest_page = native_page_info(paths)
+    if evidence:
+        tokens += sum(min(native_page_info((image,))[0], max_pixels // 1024)
+                      for image in evidence.image_paths(paths) if image not in paths)
+    return tokens, largest_page
+
+
 @lru_cache(maxsize=256)
 def native_page_info(paths):
     """Qwen3.5-9B: patch_size=16, merge_size=2，预处理对齐到 32。
@@ -164,8 +190,10 @@ def context_overflow(error):
         "maximum context", "context length", "max_model_len", "longer than the maximum"))
 
 
-def generation_messages(paths, question):
-    return [{"role": "user", "content": page_content(paths) +
+def generation_messages(paths, question, evidence=None):
+    content = (page_content(paths) if evidence is None else
+               [{"type": "text", "text": INSTRUCTION}] + _page_content_cache.get(paths, evidence.content))
+    return [{"role": "user", "content": content +
              [{"type": "text", "text": "Question: " + question}]}]
 
 
@@ -267,6 +295,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=ROOT / "data/mmlongbench/samples.json")
     parser.add_argument("--images-dir", type=Path, default=ROOT / "data/mmlongbench/images_1024")
+    parser.add_argument("--evidence-ocr-crops", action="store_true",
+                        help="For explicit evidence pages, append OCR blocks and available crops using Reasoner's renderer")
+    parser.add_argument("--blocks", type=Path)
+    parser.add_argument("--crop-root", type=Path)
     parser.add_argument("--output", type=Path,
                         help="默认按思考开关区分结果文件，避免混用两种评测设置。")
     parser.add_argument("--base-url", default=os.getenv("QWEN_BASE_URL", "http://127.0.0.1:8037/v1"))
@@ -314,6 +346,8 @@ def main(argv=None):
         filename = "qwen35_direct.json" if args.enable_thinking else "qwen35_direct_no_thinking.json"
         if args.native_resolution:
             filename = filename.replace(".json", "_native.json")
+        if args.evidence_ocr_crops:
+            filename = filename.replace(".json", "_gold_ocr_crops.json")
         if args.num_shards > 1:
             filename = filename.replace(".json", f".shard{args.shard_index}.json")
         args.output = WORKDIR / "output/mmlongbench" / filename
@@ -347,21 +381,31 @@ def main(argv=None):
         for field in ("doc_id", "question", "answer", "answer_format", "evidence_pages", "evidence_sources", "doc_type"):
             if field not in sample:
                 parser.error(f"样本缺少字段：{field}")
+    evidence = None
     if args.stage != "score":
         documents = {s["doc_id"] for s in selected}
         page_sets = sample_page_sets(args.images_dir, selected)
+        try:
+            all_selected = [s for i, s in enumerate(samples) if owners[i] == args.shard_index]
+            evidence = evidence_inputs(args, all_selected, sample_page_sets(args.images_dir, all_selected)) \
+                if args.evidence_ocr_crops else None
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        image_sets = [evidence.image_paths(paths) for paths in page_sets] if evidence else page_sets
         counts = [len(paths) for paths in set(page_sets)]
         print(f"数据检查：{len(selected)} 题 / {len(documents)} 份文档；"
               f"单题最多输入 {max(counts)} 页。前缀截断={args.truncate_long_documents}。")
         print(f"页图目录：{args.images_dir.resolve()}")
         print(f"回答服务：{args.model} @ {args.base_url}；thinking={args.enable_thinking}；"
-              f"每页 max_pixels={args.max_pixels}。服务端需允许至少 {max(counts)} 张图片。")
+              f"每图 max_pixels={args.max_pixels}。服务端需允许至少 {max(map(len, image_sets))} 张图片。")
+        if evidence:
+            print('输入模式：证据整页图 + 仅这些页的OCR和可用crop；沿用原e2e提示词。')
         print("不发送标准答案；" +
               ("超长输入仅保留可容纳的整页前缀。" if args.truncate_long_documents else "保留选定页图，超限记失败。"))
         if args.num_shards > 1:
             print(f"分片 {args.shard_index}/{args.num_shards}：{len(selected)} 题，保留原始题号。")
         if args.native_resolution:
-            infos = {paths: native_page_info(paths) for paths in set(page_sets)}
+            infos = {paths: input_image_info(paths, evidence, args.max_pixels) for paths in set(page_sets)}
             largest = max(info[1] for info in infos.values())
             if largest > args.max_pixels:
                 parser.error(f"max-pixels={args.max_pixels} 会缩图：需要至少 {largest}；请提高上限。")
@@ -387,6 +431,8 @@ def main(argv=None):
     if args.native_resolution:
         generation_config.update(min_pixels=1024, native_resolution=True,
                                  spatial_factor=32, max_model_len=args.max_model_len)
+    if evidence:
+        generation_config["evidence_content"] = evidence.metadata
     if args.truncate_long_documents:
         generation_config["input_truncation"] = {
             "policy": "whole-page-prefix-v1", "input_token_limit": args.input_token_limit,
@@ -480,13 +526,15 @@ def main(argv=None):
             if not sample.get("response"):
                 all_paths = select_input_pages(page_paths(args.images_dir, sample["doc_id"]), sample)
                 paths = all_paths
+                if evidence:
+                    sample['generation_input'] = evidence.describe(paths)
                 truncation = None
                 if args.truncate_long_documents:
                     paths, truncation = prefix_pages(all_paths, sample["question"], args.max_model_len,
                                                       args.max_tokens, args.input_token_limit)
                     sample["input_truncation"] = truncation
                 if args.native_resolution:
-                    tokens, _ = native_page_info(paths)
+                    tokens, _ = input_image_info(paths, evidence, args.max_pixels)
                     sample.update(page_count=len(paths), original_page_count=len(all_paths),
                                   estimated_visual_tokens=tokens)
                     if not args.truncate_long_documents and args.max_model_len and tokens + args.max_tokens >= args.max_model_len:
@@ -494,7 +542,7 @@ def main(argv=None):
                 while True:
                     try:
                         text, info = chat(session, args.base_url, args.model, key,
-                                          generation_messages(paths, sample["question"]),
+                                          generation_messages(paths, sample["question"], evidence),
                                           args.max_tokens, args.timeout, args.enable_thinking,
                                           temperature=args.temperature, max_pixels=args.max_pixels,
                                           min_pixels=1024 if args.native_resolution else 65536,
@@ -523,7 +571,7 @@ def main(argv=None):
                     info["context_limit"] = args.max_model_len
                 sample.update(response=text, generation=info, page_count=len(paths), status="predicted")
                 if args.native_resolution:
-                    sample["estimated_visual_tokens"] = native_page_info(paths)[0]
+                    sample["estimated_visual_tokens"] = input_image_info(paths, evidence, args.max_pixels)[0]
                 commit()  # 抽取失败时保留已生成的回答。
             if args.stage == "predict" or generation_only or stopping.is_set():
                 sample["status"] = "predicted"
@@ -560,7 +608,9 @@ def main(argv=None):
     def document_cost(doc, rows):
         paths = page_paths(args.images_dir, doc)
         page_sets = (select_input_pages(paths, row) for row in rows)
-        cost = max(native_page_info(selected)[0] + 16 * len(selected) + 512 +
+        cost = max(input_image_info(selected, evidence, args.max_pixels)[0] +
+                   16 * len(evidence.image_paths(selected) if evidence else selected) + 512 +
+                   (evidence.text_bytes(selected) if evidence else 0) +
                    len((INSTRUCTION + "\nQuestion: " + row["question"]).encode("utf-8"))
                    for row, selected in zip(rows, page_sets))
         return min(cost, args.input_token_limit, args.max_model_len - args.max_tokens) \

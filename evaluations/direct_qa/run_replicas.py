@@ -253,6 +253,9 @@ def main(argv=None):
     parser.add_argument("--model-path", type=Path, default=WORKDIR.parent / "models/Qwen3.5-9B")
     parser.add_argument("--input", type=Path, default=evaluation.ROOT / "data/mmlongbench/samples.json")
     parser.add_argument("--images-dir", type=Path, default=evaluation.ROOT / "data/mmlongbench/images_1024")
+    parser.add_argument("--evidence-ocr-crops", action="store_true")
+    parser.add_argument("--blocks", type=Path)
+    parser.add_argument("--crop-root", type=Path)
     parser.add_argument("--output-dir", type=Path,
                         default=None)
     parser.add_argument("--concurrency", type=int, default=1, help="每个模型副本的客户端并发")
@@ -342,6 +345,10 @@ def main(argv=None):
     args.images_dir = args.images_dir.resolve()
     args.input = args.input.resolve()
     args.model_path = args.model_path.resolve()
+    if args.blocks:
+        args.blocks = args.blocks.resolve()
+    if args.crop_root:
+        args.crop_root = args.crop_root.resolve()
     samples = json.loads(args.input.read_bytes())
     selected = samples[:args.limit] if args.limit else samples
     if not selected:
@@ -380,15 +387,26 @@ def main(argv=None):
 
     # 整体检查一次；各工作进程还会检查自己的分片，保证直接调用它们也安全。
     page_sets = evaluation.sample_page_sets(args.images_dir, selected)
-    infos = {paths: evaluation.native_page_info(paths) for paths in set(page_sets)}
+    try:
+        # Keep provenance stable when --limit expands on a later resume.
+        evidence = evaluation.evidence_inputs(args, samples, evaluation.sample_page_sets(args.images_dir, samples)) \
+            if args.evidence_ocr_crops else None
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
+    image_sets = [evidence.image_paths(paths) for paths in page_sets] if evidence else page_sets
+    infos = {paths: evaluation.input_image_info(paths, evidence, args.max_pixels) for paths in set(page_sets)}
     largest = max(value[1] for value in infos.values())
     if largest > args.max_pixels:
         parser.error(f"需要 max-pixels >= {largest} 才能保留当前页图分辨率。")
     oversized = {paths for paths, (tokens, _) in infos.items()
                  if tokens + args.max_tokens >= args.max_model_len}
-    print(f"分辨率检查通过：最大对齐面积={largest}；单题最多输入 {max(map(len, page_sets))} 页；"
+    print(f"分辨率检查通过：最大对齐面积={largest}；单题最多输入 {max(map(len, page_sets))} 页、"
+          f"{max(map(len, image_sets))} 张图片（含crop）；"
           f"明确超限 {sum(paths in oversized for paths in page_sets)} 题；" +
           ("将按完整页前缀截断，记录保留/丢弃页数。" if args.truncate_long_documents else "保留选定页图，超限记失败。"), flush=True)
+    if evidence:
+        print(f"证据页+OCR+crop：整页保持源分辨率；crop沿用每图max_pixels={args.max_pixels}，"
+              "超大crop由服务端预处理缩放。", flush=True)
 
     plans = []
     for shard, (gpu, port) in enumerate(zip(gpus, ports)):
@@ -408,6 +426,8 @@ def main(argv=None):
                    PYTHONUNBUFFERED="1", PYTHON_BIN=sys.executable)
         env.pop("HF_OVERRIDES", None)
         env.pop("VLLM_ALLOW_LONG_MAX_MODEL_LEN", None)
+        if evidence:
+            env["MAX_PAGES"] = str(max(map(len, image_sets)))
         command = [sys.executable, str(Path(__file__).resolve().with_name("evaluate_qwen35_mmlongbench.py")),
                    "--input", str(args.input.resolve()), "--images-dir", str(args.images_dir),
                    "--output", str(args.output_dir / f"shard{shard}.json"),
@@ -428,6 +448,8 @@ def main(argv=None):
                     "--page-content-cache-mb", str(args.page_content_cache_mb)]
         if args.truncate_long_documents:
             command += ["--truncate-long-documents", "--input-token-limit", str(args.input_token_limit)]
+        if evidence:
+            command += ["--evidence-ocr-crops", "--blocks", str(args.blocks), "--crop-root", str(args.crop_root)]
         if args.extractor_base_url:
             command += ["--extractor-base-url", args.extractor_base_url]
         if args.extractor_model:
@@ -458,6 +480,8 @@ def main(argv=None):
     config["input_sha256"] = hashlib.sha256(args.input.read_bytes()).hexdigest()
     config["num_replicas"] = len(gpus)
     config["selected_count"] = len(selected)
+    if evidence:
+        config["evidence_content"] = evidence.metadata
     config_path = args.output_dir / "run_config.json"
     # 调度配置可续跑；截断模式下上下文容量会改变保留页数，必须保持一致。
     # 实际部署配置与变化写入 run_history。
@@ -476,6 +500,8 @@ def main(argv=None):
         old_config.setdefault("shard_strategy", "sample")
         old_config.setdefault("document_warmup", True)
         old_config.setdefault("input_token_limit", 260000)
+        for key, default in (("evidence_ocr_crops", False), ("blocks", None), ("crop_root", None)):
+            old_config.setdefault(key, default)
         if ({k: v for k, v in old_config.items() if k not in runtime_keys} !=
                 {k: v for k, v in config.items() if k not in runtime_keys}):
             parser.error("该目录保存的模型/输入/分辨率等配置不同，请设置新的 --output-dir。")

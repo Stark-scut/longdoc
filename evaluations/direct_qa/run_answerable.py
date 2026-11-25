@@ -108,29 +108,37 @@ def compare(cases, agent_dir, output_dir):
     print(report, flush=True)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent-dir", type=Path, default=ROOT / "output/agent/a100_4gpu_tp1_status_c4_mm3")
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--gold-evidence-only", action="store_true", help="Send only valid annotated evidence page images")
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--gold-evidence-only", action="store_true", help="Send only valid annotated evidence page images")
+    inputs.add_argument("--gold-evidence-ocr-crops", action="store_true",
+                        help="Send gold evidence pages plus their OCR and available crops, with the original e2e prompt")
     parser.add_argument("--gpu-ids", default=os.getenv("GPU_IDS", "0,1,2"))
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0, help="Smoke test on the first N answerable questions")
     parser.add_argument("--model-path", type=Path)
     parser.add_argument("--images-dir", type=Path)
+    parser.add_argument("--blocks", type=Path, help="OCR JSONL; defaults to the Agent run's blocks")
+    parser.add_argument("--crop-root", type=Path, help="Defaults to the Agent run's crop_root")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--compare-only", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     agent_dir = args.agent_dir.resolve()
-    name = "qwen35_a100_answerable_gold" if args.gold_evidence_only else "qwen35_a100_answerable"
+    gold = args.gold_evidence_only or args.gold_evidence_ocr_crops
+    name = "qwen35_a100_answerable_gold" if gold else "qwen35_a100_answerable"
+    if args.gold_evidence_ocr_crops:
+        name += "_ocr_crops"
     output_dir = (args.output_dir or ROOT / "output/mmlongbench" / name).resolve()
     if output_dir == agent_dir or agent_dir in output_dir.parents:
         parser.error("Use an output directory outside the Agent run")
 
     try:
         cases = answerable_cases(agent_dir)
-        if args.gold_evidence_only:
+        if gold:
             cases = gold_evidence_cases(cases, agent_dir)
         if args.compare_only:
             compare(cases, agent_dir, output_dir)
@@ -148,10 +156,13 @@ def main():
             "--concurrency", str(args.concurrency), "--max-num-seqs", str(args.concurrency),
             "--shard-strategy", "document", "--document-window", "4", "--document-warmup",
             "--enable-prefix-caching", "--mm-processor-cache-gb", "4",
-            "--no-truncate-long-documents" if args.gold_evidence_only else "--truncate-long-documents",
+            "--no-truncate-long-documents" if gold else "--truncate-long-documents",
             "--input-token-limit", "260000",
             "--seed", "0", "--timeout", "900", "--limit", str(args.limit),
         ]
+        if args.gold_evidence_ocr_crops:
+            command += ["--evidence-ocr-crops", "--blocks", str(args.blocks or config["blocks"]),
+                        "--crop-root", str(args.crop_root or config["crop_root"])]
         if args.dry_run:
             with TemporaryDirectory(prefix="longdoc_answerable_") as temp:
                 path = Path(temp) / "answerable_samples.json"
