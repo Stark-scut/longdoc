@@ -14,6 +14,7 @@ from .client import Client, Failure
 from .documents import Documents, select_cases, validate_images, doc_key
 from .logging import Audit, atomic, read, sha, fingerprint, stamp, add_cost
 from .loop import Agent
+from .retrieval import verify_index_images
 from .scoring import score, metrics
 
 def result_path(root, index):
@@ -50,6 +51,8 @@ def prepare(root, config, cases):
     for doc in docs.documents.values():
         validate_images(doc, config["max_pixels"])
     inventory = asset_inventory(docs)
+    if config.get("colembed"):
+        verify_index_images(config["colembed"], inventory)
     snapshot.mkdir(parents=True)
     shutil.copytree(Path(__file__).parent, snapshot / "agent",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))

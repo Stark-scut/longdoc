@@ -379,16 +379,16 @@ def main(argv=None):
           f"冷请求上限={args.warmup_concurrency}；提取上限={args.extraction_concurrency}。", flush=True)
 
     # 整体检查一次；各工作进程还会检查自己的分片，保证直接调用它们也安全。
-    documents = {sample["doc_id"] for sample in selected}
-    infos = {doc: evaluation.native_page_info(evaluation.page_paths(args.images_dir, doc)) for doc in documents}
+    page_sets = evaluation.sample_page_sets(args.images_dir, selected)
+    infos = {paths: evaluation.native_page_info(paths) for paths in set(page_sets)}
     largest = max(value[1] for value in infos.values())
     if largest > args.max_pixels:
         parser.error(f"需要 max-pixels >= {largest} 才能保留当前页图分辨率。")
-    oversized = {doc for doc, (tokens, _) in infos.items()
+    oversized = {paths for paths, (tokens, _) in infos.items()
                  if tokens + args.max_tokens >= args.max_model_len}
-    print(f"分辨率检查通过：最大对齐面积={largest}；明确超限文档={len(oversized)}，"
-          f"相关 {sum(s['doc_id'] in oversized for s in selected)} 题超出容量；" +
-          ("将按完整页前缀截断，记录保留/丢弃页数。" if args.truncate_long_documents else "保留全部页，超限记失败。"), flush=True)
+    print(f"分辨率检查通过：最大对齐面积={largest}；单题最多输入 {max(map(len, page_sets))} 页；"
+          f"明确超限 {sum(paths in oversized for paths in page_sets)} 题；" +
+          ("将按完整页前缀截断，记录保留/丢弃页数。" if args.truncate_long_documents else "保留选定页图，超限记失败。"), flush=True)
 
     plans = []
     for shard, (gpu, port) in enumerate(zip(gpus, ports)):

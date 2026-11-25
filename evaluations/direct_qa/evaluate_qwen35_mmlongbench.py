@@ -55,11 +55,32 @@ def save_json(path, value):
 
 def page_paths(images_dir, doc_id):
     folder = images_dir / Path(doc_id).stem
-    pages = sorted(folder.glob("page_*.png"), key=lambda p: int(p.stem.split("_")[-1]))
-    indexes = [int(p.stem.split("_")[-1]) for p in pages]
+    pages = sorted(folder.glob("page_*.png"), key=page_index)
+    indexes = [page_index(path) for path in pages]
     if not pages or indexes != list(range(len(pages))):
         raise ValueError(f"页图不存在或页号不连续（应从 page_0.png 开始）：{folder}")
     return tuple(pages)
+
+
+def page_index(path):
+    return int(path.stem.split("_")[-1])
+
+
+def select_input_pages(paths, sample):
+    indices = sample.get("input_page_indices")
+    if indices is None:
+        return paths
+    if (not isinstance(indices, list) or not indices or
+            any(type(index) is not int or not 0 <= index < len(paths) for index in indices) or
+            indices != sorted(set(indices))):
+        raise ValueError(f"Invalid input_page_indices for {sample['doc_id']}: {indices!r}")
+    return tuple(paths[index] for index in indices)
+
+
+def sample_page_sets(images_dir, samples):
+    documents = {sample["doc_id"] for sample in samples}
+    paths = {doc: page_paths(images_dir, doc) for doc in documents}
+    return [select_input_pages(paths[sample["doc_id"]], sample) for sample in samples]
 
 
 @lru_cache(maxsize=256)
@@ -90,10 +111,10 @@ def page_content(paths):
 
 def _build_page_content(paths):
     content = [{"type": "text", "text": INSTRUCTION}]
-    for number, path in enumerate(paths, 1):
+    for path in paths:
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         content.extend([
-            {"type": "text", "text": f"Page {number}:"},
+            {"type": "text", "text": f"Page {page_index(path) + 1}:"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64," + encoded}},
         ])
     return content
@@ -127,7 +148,7 @@ def prefix_pages(paths, question, context_limit, output_tokens, input_limit):
     metadata = {
         "policy": "whole-page-prefix-v1", "applied": count < len(paths),
         "original_pages": len(paths), "kept_pages": count, "dropped_pages": len(paths) - count,
-        "kept_page_indices": list(range(count)), "input_token_limit": budget,
+        "kept_page_indices": [page_index(path) for path in selected], "input_token_limit": budget,
         "requested_input_token_limit": input_limit, "context_limit": context_limit,
         "output_token_budget": output_tokens, "estimated_visual_tokens": sum(costs[:count]),
         "estimated_prompt_tokens_with_reserve": used, "text_template_token_reserve": text_reserve,
@@ -328,27 +349,27 @@ def main(argv=None):
                 parser.error(f"样本缺少字段：{field}")
     if args.stage != "score":
         documents = {s["doc_id"] for s in selected}
-        counts = [len(page_paths(args.images_dir, doc)) for doc in documents]
-        print(f"数据检查：{len(selected)} 题 / {len(documents)} 份文档 / {sum(counts)} 张页图；"
-              f"最长 {max(counts)} 页。前缀截断={args.truncate_long_documents}。")
+        page_sets = sample_page_sets(args.images_dir, selected)
+        counts = [len(paths) for paths in set(page_sets)]
+        print(f"数据检查：{len(selected)} 题 / {len(documents)} 份文档；"
+              f"单题最多输入 {max(counts)} 页。前缀截断={args.truncate_long_documents}。")
         print(f"页图目录：{args.images_dir.resolve()}")
         print(f"回答服务：{args.model} @ {args.base_url}；thinking={args.enable_thinking}；"
               f"每页 max_pixels={args.max_pixels}。服务端需允许至少 {max(counts)} 张图片。")
-        print("不检索、不发送GT或证据页标签；" +
-              ("超长文档仅保留可容纳的整页前缀。" if args.truncate_long_documents else "保留全部页，超限记失败。"))
+        print("不发送标准答案；" +
+              ("超长输入仅保留可容纳的整页前缀。" if args.truncate_long_documents else "保留选定页图，超限记失败。"))
         if args.num_shards > 1:
             print(f"分片 {args.shard_index}/{args.num_shards}：{len(selected)} 题，保留原始题号。")
         if args.native_resolution:
-            infos = {doc: native_page_info(page_paths(args.images_dir, doc)) for doc in documents}
+            infos = {paths: native_page_info(paths) for paths in set(page_sets)}
             largest = max(info[1] for info in infos.values())
             if largest > args.max_pixels:
                 parser.error(f"max-pixels={args.max_pixels} 会缩图：需要至少 {largest}；请提高上限。")
-            oversized = {doc for doc, (tokens, _) in infos.items()
+            oversized = {paths for paths, (tokens, _) in infos.items()
                          if args.max_model_len and tokens + args.max_tokens >= args.max_model_len}
             print(f"原分辨率检查通过：最大对齐面积 {largest} 像素；仅做 32 像素对齐。")
             if oversized:
-                print(f"明确超出上下文：{len(oversized)} 份文档 / "
-                      f"{sum(s['doc_id'] in oversized for s in selected)} 题；" +
+                print(f"明确超出上下文：{sum(paths in oversized for paths in page_sets)} 题；" +
                       ("将保留整页前缀并记录截断。" if args.truncate_long_documents else "保留全部页，超限记失败。"))
     if args.dry_run:
         return 0
@@ -457,7 +478,7 @@ def main(argv=None):
             sample.pop("error", None)
             sample.pop("score", None)
             if not sample.get("response"):
-                all_paths = page_paths(args.images_dir, sample["doc_id"])
+                all_paths = select_input_pages(page_paths(args.images_dir, sample["doc_id"]), sample)
                 paths = all_paths
                 truncation = None
                 if args.truncate_long_documents:
@@ -491,7 +512,7 @@ def main(argv=None):
                         paths = paths[:-1]
                         truncation.update(applied=True, kept_pages=len(paths),
                                           dropped_pages=len(all_paths)-len(paths),
-                                          kept_page_indices=list(range(len(paths))),
+                                          kept_page_indices=[page_index(path) for path in paths],
                                           estimated_visual_tokens=native_page_info(paths)[0],
                                           estimated_prompt_tokens_with_reserve=(native_page_info(paths)[0] + 16*len(paths) + truncation["text_template_token_reserve"]),
                                           context_retries=truncation["context_retries"]+1)
@@ -538,8 +559,10 @@ def main(argv=None):
 
     def document_cost(doc, rows):
         paths = page_paths(args.images_dir, doc)
-        cost = native_page_info(paths)[0] + 16 * len(paths) + 512 + max(
-            len((INSTRUCTION + "\nQuestion: " + row["question"]).encode("utf-8")) for row in rows)
+        page_sets = (select_input_pages(paths, row) for row in rows)
+        cost = max(native_page_info(selected)[0] + 16 * len(selected) + 512 +
+                   len((INSTRUCTION + "\nQuestion: " + row["question"]).encode("utf-8"))
+                   for row, selected in zip(rows, page_sets))
         return min(cost, args.input_token_limit, args.max_model_len - args.max_tokens) \
             if args.truncate_long_documents else cost
 

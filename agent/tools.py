@@ -1,8 +1,10 @@
-"""Text search, image-only reads, explicit stores and memory-based reasoning."""
+"""Page search, image-only reads, explicit stores and memory-based reasoning."""
 from collections import Counter
 import json
 from .client import Failure
+from .documents import tokens
 from .reasoner import reason
+from .retrieval import rank_pages
 
 def schemas(max_pages):
     def function(name, description, properties, required):
@@ -11,7 +13,7 @@ def schemas(max_pages):
                                "additionalProperties": False}}}
     pages = {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 1}
     return [
-        function("search", "Search OCR and available captions; return short snippets and 0-based page indices.",
+        function("search", "Search this document; return ranked 0-based page indices and short OCR snippets.",
                  {"query": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1}}, ["query"]),
         function("read_page", "Read whole page images with page indices only. No OCR text, titles or crops are returned.",
                  {"pages": {**pages, "maxItems": max_pages}}, ["pages"]),
@@ -49,7 +51,14 @@ class Tools:
                 top = args.get("top_k", min(5, len(self.evidence.document.pages)))
                 if type(top) is not int or not 1 <= top <= len(self.evidence.document.pages):
                     raise Failure("invalid_arguments", "top_k must be within the document page count", True)
-                result = self.evidence.document.search(args["query"], top)
+                document = self.evidence.document
+                query = args["query"]
+                retrieval = self.config.get("colembed")
+                if retrieval:
+                    ranking = rank_pages(retrieval, document.doc_id, query, top, document.pages)
+                    result = document.search_hits(set(tokens(query)), ranking)
+                else:
+                    result = document.search(query, top)
             elif name == "read_page":
                 pages = args.get("pages")
                 if (set(args) != {"pages"} or not isinstance(pages, list) or

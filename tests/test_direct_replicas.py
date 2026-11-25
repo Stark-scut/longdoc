@@ -196,6 +196,31 @@ class DirectReplicas(unittest.TestCase):
         with patch.object(e,"page_visual_tokens",return_value=(60000,)*8):
             with self.assertRaises(ValueError):e.prefix_pages(paths,"Question?",262144,8192,1000)
 
+    def test_selected_input_sends_only_requested_images_and_preserves_page_numbers(self):
+        from PIL import Image
+
+        evaluation = runner.evaluation
+        doc = self.images / "doc"
+        Image.new("RGB", (64, 64), "blue").save(doc / "page_2.png")
+        sample = dict(self.samples[0], evidence_pages="[1, 3]", input_page_indices=[0, 2])
+        self.input.write_text(json.dumps([sample]))
+        responses = [("red", {}), ("Extracted answer: red\nAnswer format: String", {})]
+        output = self.output / "shard0.json"
+        with patch.object(evaluation, "chat", side_effect=responses) as chat, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(evaluation.main([
+                "--input", str(self.input), "--images-dir", str(self.images), "--output", str(output),
+                "--native-resolution", "--max-model-len", "65536", "--no-truncate-long-documents",
+            ]), 0)
+        content = chat.call_args_list[0].args[4][0]["content"]
+        labels = [part["text"] for part in content if part.get("text", "").startswith("Page ")]
+        self.assertEqual(labels, ["Page 1:", "Page 3:"])
+        images = [part["image_url"]["url"] for part in content if part["type"] == "image_url"]
+        self.assertEqual([evaluation.base64.b64decode(url.split(",", 1)[1]) for url in images],
+                         [(doc / f"page_{i}.png").read_bytes() for i in (0, 2)])
+        row = json.loads(output.read_text())[0]
+        self.assertEqual(row["page_count"], 2)
+        self.assertEqual(row["score"], 1.0)
+
     def test_end_to_end_whole_page_truncation(self):
         from PIL import Image
         for path in (self.images/"doc").glob("*.png"):

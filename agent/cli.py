@@ -26,6 +26,8 @@ def parser():
         q.add_argument("--model")
         q.add_argument("--extractor-base-url")
         q.add_argument("--extractor-model")
+        q.add_argument("--colembed-url", help="ColEmbed page-ranking service URL")
+        q.add_argument("--colembed-index-dir", type=Path, help="Frozen vLLM ColEmbed page index")
         for name in ("max-rounds", "read-page-max", "max-model-len", "max-pixels", "seed",
                      "locator-max-tokens", "reasoner-max-tokens"):
             q.add_argument("--" + name, type=int)
@@ -57,6 +59,7 @@ def parser():
     q.add_argument("--output-dir", type=Path, default=ROOT / "output/agent/native")
     q.add_argument("--indices")
     q.add_argument("--limit", type=int, default=0)
+    q.add_argument("--answerable-only", action="store_true", help="Skip questions labeled Not answerable before applying --limit")
     q.add_argument("--stage", choices=("all", "agent", "score"), default="all")
     q.add_argument("--retry-failed", action="store_true")
     q.add_argument("--ready-timeout", type=float, default=1200)
@@ -80,6 +83,8 @@ def parser():
 
 def configuration(args):
     config = load(args.config)
+    if getattr(args, "answerable_only", False):
+        config["answerable_only"] = True
     if args.data_dir:
         config = with_data_dir(config, args.data_dir)
     for name in ("samples", "blocks", "images_dir", "crop_root", "captions", "model_path",
@@ -111,6 +116,15 @@ def configuration(args):
         value = getattr(args, name, None)
         if value is not None:
             config["server"][name] = value
+    if args.colembed_url or args.colembed_index_dir:
+        from .retrieval import load_index
+
+        if (not args.colembed_url or not args.colembed_index_dir or
+                not args.colembed_url.startswith(("http://", "https://"))):
+            raise ValueError("Pass a valid --colembed-url and --colembed-index-dir together")
+        index_dir = args.colembed_index_dir.resolve()
+        config["colembed"] = {"url": args.colembed_url.rstrip("/"), "index_dir": str(index_dir),
+                              "index_id": load_index(index_dir)["index_id"]}
     return validate(config)
 
 def main(argv=None):

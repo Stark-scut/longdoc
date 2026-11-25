@@ -19,6 +19,7 @@ from tqdm import tqdm
 from .documents import select_cases, doc_key
 from .evaluation import prepare, verify, aggregate, needs_work, result_path
 from .logging import atomic, read, stamp
+from .retrieval import check_service
 from .scheduling import DocumentQueue, partition_documents
 
 def work_plan(cases, pending, replicas, concurrency, strategy):
@@ -191,8 +192,9 @@ def launch(args, config):
     ids, ports = gpu_ports(args.gpu_ids, args.ports, local, tp)
     groups = gpu_groups(ids, tp)
     replicas = len(ports)
+    answerable_only = config.get("answerable_only", False)
     if args.dry_run:
-        cases = select_cases(config["samples"], args.indices, args.limit)
+        cases = select_cases(config["samples"], args.indices, args.limit, answerable_only=answerable_only)
         for key in ("blocks", "images_dir"):
             if not Path(config[key]).exists():
                 raise ValueError("Missing " + key + ": " + config[key])
@@ -222,11 +224,11 @@ def launch(args, config):
             run = read(root / "run_config.json"); verify(root, run, config)
             cases = read(root / "snapshot/inputs/cases.json")
             if args.indices is not None or args.limit:
-                chosen = select_cases(config["samples"], args.indices, args.limit)
+                chosen = select_cases(config["samples"], args.indices, args.limit, answerable_only=answerable_only)
                 if [c["_sample_index"] for c in chosen] != [c["_sample_index"] for c in cases]:
                     raise ValueError("Selected sample set differs from saved run")
         else:
-            cases = select_cases(config["samples"], args.indices, args.limit)
+            cases = select_cases(config["samples"], args.indices, args.limit, answerable_only=answerable_only)
             run = prepare(root, config, cases)
         if args.prepare_only:
             print("Prepared independent Agent snapshot: " + str(root), flush=True)
@@ -237,6 +239,8 @@ def launch(args, config):
         if not pending:
             summary = aggregate(root, args.stage, True)
             print(json.dumps(summary, ensure_ascii=False, indent=2)); return 0
+        if args.stage != "score" and config.get("colembed"):
+            check_service(config["colembed"])
         if not (root / "snapshot/agent/scheduling.py").is_file() and (
                 args.shard_strategy != "sample" or args.asset_mode != "copy"):
             raise ValueError("Saved snapshot predates document queues/path references; use a new output directory "

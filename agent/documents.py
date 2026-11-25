@@ -75,12 +75,16 @@ class Document:
                     idf = math.log(1 + (len(self.pages) - self.df[term] + .5) / (self.df[term] + .5))
                     score += idf * tf * 2.5 / (tf + 1.5 * (.25 + .75 * length / max(1, self.avglen)))
             scores[index] = score
+        ranking = sorted(self.order, key=lambda i: (-scores[i], i))[:top_k]
+        return self.search_hits(query_terms, [(index, scores[index]) for index in ranking])
+
+    def search_hits(self, query_terms, ranking):
         result = []
-        for index in sorted(self.order, key=lambda i: (-scores[i], i))[:top_k]:
+        for index, score in ranking:
             text = self.texts[index]
             locations = [text.lower().find(term) for term in query_terms if term in text.lower()]
             start = max(0, min(locations) - 80) if locations else 0
-            result.append({"page": index, "score": round(scores[index], 5),
+            result.append({"page": index, "score": round(score, 5),
                            "snippet": text[start:start + 360]})
         return result
 
@@ -161,9 +165,13 @@ class Documents:
         self.documents.move_to_end(doc)
         return self.documents[doc]
 
-def select_cases(path, indices=None, limit=0):
+def select_cases(path, indices=None, limit=0, *, answerable_only=False):
     samples = json.loads(Path(path).read_text())
     selected = list(range(len(samples))) if indices is None else [int(v) for v in indices.split(",")]
+    if answerable_only:
+        if any(i < 0 or i >= len(samples) for i in selected):
+            raise ValueError("Invalid sample indices")
+        selected = [i for i in selected if samples[i]["answer"] != "Not answerable"]
     if limit:
         selected = selected[:limit]
     if not selected or len(set(selected)) != len(selected) or any(i < 0 or i >= len(samples) for i in selected):
